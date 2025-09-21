@@ -30,6 +30,10 @@ final class ExtensionManager: NSObject, ObservableObject, WKWebExtensionControll
     private var tabAdapters: [UUID: ExtensionTabAdapter] = [:]
     internal var windowAdapter: ExtensionWindowAdapter?
     private weak var browserManagerRef: BrowserManager?
+    
+    // Prevent rapid space switching that causes adapter sync issues
+    private var lastSpaceSwitchTime: Date = Date.distantPast
+    private let spaceSwitchCooldown: TimeInterval = 0.1 // 100ms cooldown
     // Whether to auto-resize extension action popovers to content. Disabled per UX preference.
     private let shouldAutoSizeActionPopups: Bool = false
 
@@ -186,13 +190,81 @@ final class ExtensionManager: NSObject, ObservableObject, WKWebExtensionControll
     }
 
     func switchProfile(_ profileId: UUID) {
-        guard let controller = extensionController else { return }
+        print("🔄 [ExtensionManager] switchProfile() called for profile=\(profileId.uuidString)")
+        
+        guard let controller = extensionController else { 
+            print("❌ [ExtensionManager] No extension controller available")
+            return 
+        }
+        
+        print("🔄 [ExtensionManager] About to clear \(tabAdapters.count) tab adapters")
+        
+        // CRITICAL: Completely disable extension communication during profile switch
+        // This prevents "Tab not found" errors that cause crashes
+        print("🔄 [ExtensionManager] Disabling extension communication during profile switch")
+        extensionController = nil
+        
+        // Clear all adapters
+        clearAllTabAdapters()
+        
+        print("🔄 [ExtensionManager] Getting extension data store for profile=\(profileId.uuidString)")
         let store = getExtensionDataStore(for: profileId)
+        
+        print("🔄 [ExtensionManager] Switching controller data store")
         controller.configuration.defaultWebsiteDataStore = store
         currentProfileId = profileId
         print("🔁 [ExtensionManager] Switched controller data store to profile=\(profileId.uuidString)")
+        
+        // Re-enable extension communication after a brief delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            print("🔄 [ExtensionManager] Re-enabling extension communication")
+            self?.extensionController = controller
+        }
+        
         // Verify storage on the new profile
+        print("🔄 [ExtensionManager] Verifying extension storage")
         verifyExtensionStorage(profileId)
+        print("✅ [ExtensionManager] switchProfile() completed for profile=\(profileId.uuidString)")
+    }
+    
+    /// Clear ALL tab adapters - used during profile switches to prevent conflicts
+    private func clearAllTabAdapters() {
+        let adapterCount = tabAdapters.count
+        tabAdapters.removeAll()
+        print("🧹 [ExtensionManager] Cleared ALL \(adapterCount) tab adapters for profile switch")
+    }
+    
+    
+    /// Clear tab adapters that are no longer valid for the current profile/space context
+    private func clearStaleTabAdapters() {
+        guard let bm = browserManagerRef else { return }
+        
+        let currentSpace = bm.tabManager.currentSpace
+        let currentProfile = bm.currentProfile
+        
+        // Get all valid tab IDs for the current context
+        var validTabIds: Set<UUID> = []
+        
+        // Add global pinned tabs
+        validTabIds.formUnion(bm.tabManager.pinnedTabs.map { $0.id })
+        
+        // Add space-specific tabs
+        if let space = currentSpace {
+            validTabIds.formUnion(bm.tabManager.tabs(in: space).map { $0.id })
+            validTabIds.formUnion(bm.tabManager.spacePinnedTabs(for: space.id).map { $0.id })
+        }
+        
+        // Add profile essential tabs
+        if let profile = currentProfile {
+            validTabIds.formUnion(bm.tabManager.essentialTabs(for: profile.id).map { $0.id })
+        }
+        
+        // Remove adapters for tabs that are no longer valid
+        let staleAdapters = tabAdapters.keys.filter { !validTabIds.contains($0) }
+        for tabId in staleAdapters {
+            tabAdapters.removeValue(forKey: tabId)
+            print("🧹 [ExtensionManager] Cleared stale adapter for tab: \(tabId)")
+        }
     }
 
     func clearExtensionData(for profileId: UUID) {
@@ -903,18 +975,32 @@ final class ExtensionManager: NSObject, ObservableObject, WKWebExtensionControll
 
     // MARK: - Controller event notifications for tabs
     private var lastCachedAdapterLog: Date = Date.distantPast
+    private var lastAdapterCallTime: Date = Date.distantPast
+    private let adapterCallThrottle: TimeInterval = 0.01 // 10ms throttle
     
     @available(macOS 15.5, *)
     private func adapter(for tab: Tab, browserManager: BrowserManager) -> ExtensionTabAdapter {
+        
+        // CRITICAL: Throttle adapter calls to prevent memory pressure crashes
+        let now = Date()
+        if now.timeIntervalSince(lastAdapterCallTime) < adapterCallThrottle {
+            // Return cached adapter immediately without logging to prevent spam
+            if let existing = tabAdapters[tab.id] {
+                return existing
+            }
+        }
+        lastAdapterCallTime = now
+        
         if let existing = tabAdapters[tab.id] { 
             // Only log cached adapter access every 10 seconds to prevent spam
-            let now = Date()
             if now.timeIntervalSince(lastCachedAdapterLog) > 10.0 {
                 print("[ExtensionManager] Returning CACHED adapter for '\(tab.name)': \(ObjectIdentifier(existing))")
                 lastCachedAdapterLog = now
             }
             return existing 
         }
+        
+        print("🔄 [ExtensionManager] Creating new adapter for tab: \(tab.name)")
         let created = ExtensionTabAdapter(tab: tab, browserManager: browserManager)
         tabAdapters[tab.id] = created
         print("[ExtensionManager] Created NEW adapter for '\(tab.name)': \(ObjectIdentifier(created))")
@@ -924,8 +1010,16 @@ final class ExtensionManager: NSObject, ObservableObject, WKWebExtensionControll
     // Expose a stable adapter getter for window adapters
     @available(macOS 15.4, *)
     func stableAdapter(for tab: Tab) -> ExtensionTabAdapter? {
-        guard let bm = browserManagerRef else { return nil }
-        return adapter(for: tab, browserManager: bm)
+        print("🔧 [ExtensionManager] stableAdapter called for tab: \(tab.name)")
+        guard let bm = browserManagerRef else { 
+            print("❌ [ExtensionManager] No browserManagerRef for stableAdapter")
+            return nil 
+        }
+        
+        print("🔧 [ExtensionManager] About to call private adapter method for: \(tab.name)")
+        let result = adapter(for: tab, browserManager: bm)
+        print("🔧 [ExtensionManager] Private adapter method completed for: \(tab.name)")
+        return result
     }
 
     @available(macOS 15.4, *)
@@ -937,12 +1031,33 @@ final class ExtensionManager: NSObject, ObservableObject, WKWebExtensionControll
 
     @available(macOS 15.4, *)
     func notifyTabActivated(newTab: Tab, previous: Tab?) {
-        guard let bm = browserManagerRef, let controller = extensionController else { return }
+        print("🔄 [ExtensionManager] notifyTabActivated() called for tab: \(newTab.name), previous: \(previous?.name ?? "nil")")
+        
+        guard let bm = browserManagerRef, let controller = extensionController else { 
+            print("❌ [ExtensionManager] Missing browserManagerRef or controller")
+            return 
+        }
+        
+        print("🔄 [ExtensionManager] Creating adapters")
         let newA = adapter(for: newTab, browserManager: bm)
         let oldA = previous.map { adapter(for: $0, browserManager: bm) }
+        print("✅ [ExtensionManager] Adapters created")
+        
+        print("🔄 [ExtensionManager] Calling didActivateTab")
         controller.didActivateTab(newA, previousActiveTab: oldA)
+        print("✅ [ExtensionManager] didActivateTab completed")
+        
+        print("🔄 [ExtensionManager] Calling didSelectTabs")
         controller.didSelectTabs([newA])
-        if let oldA { controller.didDeselectTabs([oldA]) }
+        print("✅ [ExtensionManager] didSelectTabs completed")
+        
+        if let oldA { 
+            print("🔄 [ExtensionManager] Calling didDeselectTabs")
+            controller.didDeselectTabs([oldA])
+            print("✅ [ExtensionManager] didDeselectTabs completed")
+        }
+        
+        print("✅ [ExtensionManager] notifyTabActivated() completed")
     }
 
     @available(macOS 15.4, *)

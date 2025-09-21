@@ -6,8 +6,6 @@ struct SidebarView: View {
     @EnvironmentObject var browserManager: BrowserManager
     @EnvironmentObject var windowState: BrowserWindowState
     @Environment(\.tabDragManager) private var dragManager
-    @State private var scrollPosition = ScrollPosition(edge: .leading)
-    @State private var currentScrollID: Int? = nil
     @State private var activeSpaceIndex: Int = 0
     @State private var hasTriggeredHaptic = false
     @State private var spaceName = ""
@@ -192,72 +190,26 @@ struct SidebarView: View {
     }
     
     private var spacesContent: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            spacesHStack
-        }
-        // Match the full sidebar width to avoid early clipping when swiping
-        .frame(width: effectiveWidth)
-        .contentMargins(.horizontal, 0)
-        .scrollTargetLayout()
-        .coordinateSpace(name: "SidebarGlobal")
-        .scrollTargetBehavior(.viewAligned)
-        .scrollIndicators(.hidden)
-        .scrollPosition(id: $currentScrollID, anchor: .topLeading)
-        // Keep the active space locked to the leading edge when resizing
-        .onChange(of: windowState.sidebarWidth) { _, _ in
-            // Force a re-snap by clearing then restoring the target id without animation.
-            // Some SwiftUI versions ignore setting the same id; this guarantees an update.
-            let target = activeSpaceIndex
-            var t = Transaction()
-            t.disablesAnimations = true
-            withTransaction(t) {
-                currentScrollID = nil
-            }
-            DispatchQueue.main.async {
-                var t2 = Transaction()
-                t2.disablesAnimations = true
-                withTransaction(t2) {
-                    currentScrollID = target
+        return SimpleSpacePager(
+            selection: $activeSpaceIndex,
+            spaces: browserManager.tabManager.spaces,
+            width: effectiveWidth,
+            onSpaceChanged: { newSpaceIndex in
+                guard newSpaceIndex >= 0 && newSpaceIndex < browserManager.tabManager.spaces.count else {
+                    print("⚠️ [SidebarView] Invalid space index: \(newSpaceIndex)")
+                    return
                 }
-            }
-        }
-        .onAppear {
-            // Initialize to current active space
-            activeSpaceIndex = targetScrollPosition
-            currentScrollID = targetScrollPosition
-            print("🔄 Initialized activeSpaceIndex: \(activeSpaceIndex), currentScrollID: \(targetScrollPosition)")
-        }
-        .onChange(of: windowState.currentSpaceId) { _, _ in
-            // Space was changed programmatically (e.g., clicking bottom icons)
-            let newSpaceIndex = targetScrollPosition
-            if newSpaceIndex != activeSpaceIndex {
-                print("🎯 Programmatic space change - snapping to space \(newSpaceIndex)")
-                // Step 1: clear scroll target without animation
-                var t = Transaction()
-                t.disablesAnimations = true
-                withTransaction(t) { currentScrollID = nil }
-                // Step 2: update visible window immediately so target exists
+                
+                // CRITICAL: Update activeSpaceIndex FIRST to keep UI in sync
+                // This prevents the onChange(currentSpaceId) from triggering since the index is already correct
+                print("🎯 Swipe gesture: updating activeSpaceIndex from \(activeSpaceIndex) to \(newSpaceIndex)")
                 activeSpaceIndex = newSpaceIndex
-                // Step 3: set target on next runloop tick
-                DispatchQueue.main.async {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        currentScrollID = newSpaceIndex
-                    }
-                }
-            }
-        }
-        .onChange(of: browserManager.tabManager.spaces.count) { _, newCount in
-            // Spaces were added or deleted - ensure activeSpaceIndex is valid
-            let newSpaceIndex = targetScrollPosition
-            if newSpaceIndex != activeSpaceIndex {
-                print("🔄 Spaces count changed to \(newCount) - updating activeSpaceIndex from \(activeSpaceIndex) to \(newSpaceIndex)")
-                activeSpaceIndex = newSpaceIndex
-                currentScrollID = newSpaceIndex
-            }
-        }
-        .onScrollPhaseChange { oldPhase, newPhase in
-            if newPhase == .interacting && oldPhase == .idle {
-                // Drag just started - fire haptic after short delay
+                
+                let space = browserManager.tabManager.spaces[newSpaceIndex]
+                print("🎯 NSPageController activated space: \(space.name) (index: \(newSpaceIndex))")
+                browserManager.setActiveSpace(space, in: windowState)
+            },
+            onDragStarted: {
                 if !hasTriggeredHaptic {
                     hasTriggeredHaptic = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
@@ -266,14 +218,39 @@ struct SidebarView: View {
                         print("🎯 Haptic 0.1s after drag start")
                     }
                 }
-            } else if newPhase == .idle && oldPhase != .idle {
-                // Drag just ended - activate the space and update visible window
-                hasTriggeredHaptic = false // Reset haptic flag
-                if let newSpaceIndex = currentScrollID {
-                    let space = browserManager.tabManager.spaces[newSpaceIndex]
-                    print("🎯 Drag ended - Activating space: \(space.name) (index: \(newSpaceIndex))")
-                    browserManager.setActiveSpace(space, in: windowState)
-                    activeSpaceIndex = newSpaceIndex  // Update visible window ONLY on drag end
+            },
+            onDragEnded: {
+                hasTriggeredHaptic = false
+            }
+        )
+        .onAppear {
+            // Simple initialization - NSPageController handles the rest
+            activeSpaceIndex = targetScrollPosition
+            print("🔄 Initialized activeSpaceIndex: \(activeSpaceIndex)")
+        }
+        .onChange(of: windowState.currentSpaceId) { _, newSpaceId in
+            // CRITICAL: Only sync activeSpaceIndex for external changes (clicks, programmatic)
+            // Swipe gestures handle their own activeSpaceIndex updates via onSpaceChanged
+            guard newSpaceId != nil else { return }
+            
+            let newSpaceIndex = targetScrollPosition
+            if newSpaceIndex != activeSpaceIndex {
+                print("🎯 External space change detected - syncing activeSpaceIndex from \(activeSpaceIndex) to \(newSpaceIndex)")
+                
+                // CRITICAL: Use immediate sync for external changes to prevent UI desync
+                // The key is that swipe gestures bypass this by updating activeSpaceIndex directly in onSpaceChanged
+                // Only non-swipe changes (clicks, programmatic) will trigger this onChange
+                activeSpaceIndex = newSpaceIndex
+            }
+        }
+        .onChange(of: browserManager.tabManager.spaces.count) { _, newCount in
+            // Handle space count changes
+            let newSpaceIndex = min(targetScrollPosition, newCount - 1)
+            if newSpaceIndex != activeSpaceIndex {
+                print("🔄 Spaces count changed to \(newCount) - updating activeSpaceIndex to \(newSpaceIndex)")
+                // Defer the update to avoid SwiftUI view update conflicts
+                DispatchQueue.main.async {
+                    activeSpaceIndex = max(0, newSpaceIndex)
                 }
             }
         }
@@ -296,8 +273,6 @@ struct SidebarView: View {
                         onMuteTab: { $0.toggleMute() }
                     )
                     .id(space.id)
-                    // Each page is exactly one sidebar-width wide for viewAligned snapping
-                    .frame(width: effectiveWidth)
                 }
                 .id(spaceIndex)
             }

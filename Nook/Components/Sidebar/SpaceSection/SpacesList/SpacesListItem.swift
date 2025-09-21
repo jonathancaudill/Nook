@@ -26,7 +26,9 @@ struct SpacesListItem: View {
     
     var body: some View {
         Button {
-            browserManager.setActiveSpace(space, in: windowState)
+            // CRITICAL: Completely disable button clicks - swipe gestures take full control
+            // This prevents the duplicate setActiveSpace calls that cause crashes
+            print("🎯 [SpacesListItem] Button click disabled - swipe gestures handle all space switching")
         } label: {
             ZStack {
                 if compact && !isActive {

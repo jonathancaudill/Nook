@@ -556,6 +556,9 @@ class TabManager: ObservableObject {
 
     func setActiveSpace(_ space: Space) {
         guard spaces.contains(where: { $0.id == space.id }) else { return }
+        
+        // Prevent recursive space switching
+        guard currentSpace?.id != space.id else { return }
 
         // Edge case: assign space to current profile if missing
         if space.profileId == nil {

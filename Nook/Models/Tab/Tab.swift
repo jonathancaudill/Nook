@@ -127,7 +127,9 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
     var webView: WKWebView? {
         if _webView == nil {
             print("🔧 [Tab] First webView access, calling setupWebView() for: \(url.absoluteString)")
+            print("🔧 [Tab] CRITICAL: WebView getter triggering setupWebView during swipe - this might be the crash point!")
             setupWebView()
+            print("🔧 [Tab] CRITICAL: setupWebView completed in webView getter for: \(url.absoluteString)")
         }
         return _webView
     }
@@ -299,12 +301,21 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
             }
         }
 
+        print("🔧 [Tab] Creating FocusableWKWebView with configuration...")
         _webView = FocusableWKWebView(frame: .zero, configuration: configuration)
-        if let fv = _webView as? FocusableWKWebView { fv.owningTab = self }
+        print("🔧 [Tab] WebView created successfully: \(_webView != nil)")
+        
+        if let fv = _webView as? FocusableWKWebView { 
+            fv.owningTab = self 
+            print("🔧 [Tab] Set owning tab on FocusableWKWebView")
+        }
+        
+        print("🔧 [Tab] Setting WebView delegates and properties...")
         _webView?.navigationDelegate = self
         _webView?.uiDelegate = self
         _webView?.allowsBackForwardNavigationGestures = true
         _webView?.allowsMagnification = true
+        print("🔧 [Tab] WebView delegates and properties set")
         
         if let webView = _webView {
             setupThemeColorObserver(for: webView)
@@ -349,16 +360,29 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
         }
 
         print("Created WebView for tab: \(name)")
+        
+        // CRITICAL: Add crash debugging around extension operations after profile switches
+        print("🔧 [Tab] About to notify extensions tab opened for: \(name)")
         // Inform extensions that this tab's view is now open/available BEFORE loading,
         // so content scripts and messaging can resolve this tab during early document phases
         if #available(macOS 15.5, *), didNotifyOpenToExtensions == false {
             ExtensionManager.shared.notifyTabOpened(self)
             didNotifyOpenToExtensions = true
+            print("🔧 [Tab] Extensions notified of tab open for: \(name)")
         }
+        
+        print("🔧 [Tab] About to create extension adapter for: \(name)")
+        _ = ExtensionManager.shared.stableAdapter(for: self)
+        print("🔧 [Tab] Extension adapter created successfully for: \(name)")
+        
         // For popup-hosting tabs, don't trigger an initial navigation. WebKit will
         // drive the load into this returned webView from createWebViewWith:.
         if !isPopupHost {
+            print("🔧 [Tab] About to load URL for: \(name)")
             loadURL(url)
+            print("🔧 [Tab] URL load initiated for: \(name)")
+        } else {
+            print("🔧 [Tab] Skipping URL load for popup host: \(name)")
         }
     }
 

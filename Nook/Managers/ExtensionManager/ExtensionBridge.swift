@@ -63,8 +63,54 @@ final class ExtensionWindowAdapter: NSObject, WKWebExtensionWindow {
             lastTabsCall = now
         }
         
-        let all = browserManager.tabManager.pinnedTabs + browserManager.tabManager.tabs
-        let adapters = all.compactMap { ExtensionManager.shared.stableAdapter(for: $0) }
+        // Get tabs for the current space/profile context to prevent adapter mismatches
+        let currentSpace = browserManager.tabManager.currentSpace
+        let currentProfile = browserManager.currentProfile
+        
+        var relevantTabs: [Tab] = []
+        
+        // Add global pinned tabs (these are always visible)
+        relevantTabs.append(contentsOf: browserManager.tabManager.pinnedTabs)
+        
+        // Add space-specific tabs
+        if let space = currentSpace {
+            relevantTabs.append(contentsOf: browserManager.tabManager.tabs(in: space))
+            relevantTabs.append(contentsOf: browserManager.tabManager.spacePinnedTabs(for: space.id))
+        }
+        
+        // Add profile essential tabs if different from current space
+        if let profile = currentProfile,
+           currentSpace?.profileId != profile.id {
+            relevantTabs.append(contentsOf: browserManager.tabManager.essentialTabs(for: profile.id))
+        }
+        
+        // Remove duplicates while preserving order
+        var uniqueTabs: [Tab] = []
+        var seenIds: Set<UUID> = []
+        for tab in relevantTabs {
+            if !seenIds.contains(tab.id) {
+                uniqueTabs.append(tab)
+                seenIds.insert(tab.id)
+            }
+        }
+        
+        let adapters = uniqueTabs.compactMap { ExtensionManager.shared.stableAdapter(for: $0) }
+        
+        // Validate that the current active tab is included
+        if let currentTab = browserManager.currentTabForActiveWindow(),
+           !uniqueTabs.contains(where: { $0.id == currentTab.id }) {
+            print("⚠️ [ExtensionWindowAdapter] Current active tab not in relevant tabs list - adding it")
+            if let adapter = ExtensionManager.shared.stableAdapter(for: currentTab) {
+                return adapters + [adapter]
+            }
+        }
+        
+        // CRITICAL: If we have no adapters but there should be tabs, return empty array
+        // This prevents extension communication errors during profile switches
+        if adapters.isEmpty && !uniqueTabs.isEmpty {
+            print("⚠️ [ExtensionWindowAdapter] No adapters available for \(uniqueTabs.count) tabs - returning empty to prevent extension errors")
+            return []
+        }
         
         return adapters
     }

@@ -12,8 +12,7 @@
 		2C0516652E7B6C510038ADBE /* BasicAuthCredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C0516642E7B6C510038ADBE /* BasicAuthCredentialStore.swift */; };
 		2C0516672E7B6C750038ADBE /* BasicAuthDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C0516662E7B6C750038ADBE /* BasicAuthDialog.swift */; };
 		2C0516692E7C85C10038ADBE /* BrowserWindowState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C0516682E7C85C10038ADBE /* BrowserWindowState.swift */; };
-		2CAAD9612E7FC09A00333014 /* SimpleSpacePager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CAAD95F2E7FC09A00333014 /* SimpleSpacePager.swift */; };
-		2CAAD9622E7FC09A00333014 /* SpacePageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CAAD9602E7FC09A00333014 /* SpacePageView.swift */; };
+		2CAE43042E7F3E9500AB396B /* SpacePageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CAE43032E7F3E9500AB396B /* SpacePageView.swift */; };
 		2CC0672B2E789ECB001D37C6 /* TabDragContainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CC066622E789ECB001D37C6 /* TabDragContainerView.swift */; };
 		2CC0672C2E789ECB001D37C6 /* InsertionLineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CC0665E2E789ECB001D37C6 /* InsertionLineView.swift */; };
 		2CC0672D2E789ECB001D37C6 /* URLBarFramePreferenceKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CC066972E789ECB001D37C6 /* URLBarFramePreferenceKey.swift */; };
@@ -185,8 +184,7 @@
 		2C0516642E7B6C510038ADBE /* BasicAuthCredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BasicAuthCredentialStore.swift; sourceTree = "<group>"; };
 		2C0516662E7B6C750038ADBE /* BasicAuthDialog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BasicAuthDialog.swift; sourceTree = "<group>"; };
 		2C0516682E7C85C10038ADBE /* BrowserWindowState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserWindowState.swift; sourceTree = "<group>"; };
-		2CAAD95F2E7FC09A00333014 /* SimpleSpacePager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimpleSpacePager.swift; sourceTree = "<group>"; };
-		2CAAD9602E7FC09A00333014 /* SpacePageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacePageView.swift; sourceTree = "<group>"; };
+		2CAE43032E7F3E9500AB396B /* SpacePageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacePageView.swift; sourceTree = "<group>"; };
 		2CC066382E789ECB001D37C6 /* TabListAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabListAdapter.swift; sourceTree = "<group>"; };
 		2CC0663A2E789ECB001D37C6 /* TabCollectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabCollectionView.swift; sourceTree = "<group>"; };
 		2CC0663B2E789ECB001D37C6 /* TabCollectionView_Previews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TabCollectionView_Previews.swift; sourceTree = "<group>"; };
@@ -593,8 +591,7 @@
 		2CC066992E789ECB001D37C6 /* Sidebar */ = {
 			isa = PBXGroup;
 			children = (
-				2CAAD95F2E7FC09A00333014 /* SimpleSpacePager.swift */,
-				2CAAD9602E7FC09A00333014 /* SpacePageView.swift */,
+				2CAE43032E7F3E9500AB396B /* SpacePageView.swift */,
 				2CC066812E789ECB001D37C6 /* NavButtons */,
 				2CC066862E789ECB001D37C6 /* PinnedButtons */,
 				2CC066902E789ECB001D37C6 /* SpaceSection */,
@@ -1277,8 +1274,6 @@
 				2CC067872E789ECB001D37C6 /* SettingsManagerUtils.swift in Sources */,
 				2CC067882E789ECB001D37C6 /* TabsModel.swift in Sources */,
 				2CC067892E789ECB001D37C6 /* PasteboardTypes.swift in Sources */,
-				2CAAD9612E7FC09A00333014 /* SimpleSpacePager.swift in Sources */,
-				2CAAD9622E7FC09A00333014 /* SpacePageView.swift in Sources */,
 				2CC0678A2E789ECB001D37C6 /* TabCollectionViewItem.swift in Sources */,
 				2CC0678B2E789ECB001D37C6 /* DragDropPreview.swift in Sources */,
 				2CC0678C2E789ECB001D37C6 /* CacheManagementView.swift in Sources */,
@@ -1338,6 +1333,7 @@
 				2CC067C02E789ECB001D37C6 /* SettingsManager.swift in Sources */,
 				2CC067C12E789ECB001D37C6 /* SidebarView.swift in Sources */,
 				2CC067C22E789ECB001D37C6 /* TabCompositorView.swift in Sources */,
+				2CAE43042E7F3E9500AB396B /* SpacePageView.swift in Sources */,
 				2CC067C32E789ECB001D37C6 /* SettingsDialog.swift in Sources */,
 				2CC067C42E789ECB001D37C6 /* Space.swift in Sources */,
 			);

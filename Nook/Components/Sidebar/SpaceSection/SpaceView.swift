@@ -36,6 +36,11 @@ struct SpaceView: View {
     // (no coordinate spaces needed for simple DnD)
     
     var body: some View {
+        let pinnedTabs = spacePinnedTabs
+        let regularTabs = tabs
+        
+        print("🔍 [SpaceView] Rendering space '\(space.name)' with \(tabs.count) total tabs (\(pinnedTabs.count) pinned, \(regularTabs.count) regular), width: \(width)")
+        
         return VStack(spacing: 8) {
             SpaceTittle(space: space)
                 .padding(.horizontal, 8)
@@ -80,6 +85,7 @@ struct SpaceView: View {
                             )
                         }
                     }
+                    .frame(maxWidth: .infinity)
                     .contentShape(Rectangle())
                     .onDrop(
                         of: [.text],
@@ -248,7 +254,10 @@ struct SpaceView: View {
                         }
                     }
                     .animation(.easeInOut(duration: 0.15), value: tabs.count)
+                    .frame(maxWidth: .infinity)
                 }
+                .frame(maxWidth: .infinity)
+                // ScrollView width is constrained by parent SpaceView
                 // Fallback drop target that covers the entire scroll area, including
                 // the large empty region below the last tab. Drops here append to end.
                 .onDrop(
@@ -272,6 +281,26 @@ struct SpaceView: View {
         .scrollTargetLayout()
         .onReceive(NotificationCenter.default.publisher(for: .tabDragDidEnd)) { _ in
             draggedItem = nil
+        }
+        .onAppear {
+            print("🔍 [SpaceView] SpaceView appeared for space '\(space.name)' with \(tabs.count) tabs (\(spacePinnedTabs.count) pinned)")
+            
+            // CRITICAL: DO NOT access webView property during SwiftUI rendering!
+            // This was triggering WebView creation during NSPageController animations,
+            // causing race conditions during profile switches.
+            print("🔍 [SpaceView] About to enumerate tabs for space '\(space.name)' (lazy enumeration - no WebView access)...")
+            for (index, tab) in tabs.enumerated() {
+                print("🔍 [SpaceView] Tab \(index): \(tab.name) - isUnloaded: \(tab.isUnloaded)")
+            }
+            print("🔍 [SpaceView] Tab enumeration completed for space '\(space.name)'")
+            
+            print("🔍 [SpaceView] About to enumerate pinned tabs for space '\(space.name)' (lazy enumeration)...")
+            for (index, tab) in spacePinnedTabs.enumerated() {
+                print("🔍 [SpaceView] Pinned tab \(index): \(tab.name) - isUnloaded: \(tab.isUnloaded)")
+            }
+            print("🔍 [SpaceView] Pinned tab enumeration completed for space '\(space.name)'")
+            
+            print("🔍 [SpaceView] onAppear completed for space '\(space.name)' - NO WebView creation during UI rendering!")
         }
         
         func isFirstTab(_ tab: Tab) -> Bool {

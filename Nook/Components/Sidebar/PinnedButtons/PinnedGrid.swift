@@ -102,8 +102,6 @@ struct PinnedGrid: View {
             }
             // Natural updates; avoid cross-profile transition artifacts
         }
-        .animation(shouldAnimate ? .easeInOut(duration: 0.18) : nil, value: colsCount)
-        .animation(shouldAnimate ? .easeInOut(duration: 0.18) : nil, value: items.count)
         .allowsHitTesting(!browserManager.isTransitioningProfile)
         )
     }

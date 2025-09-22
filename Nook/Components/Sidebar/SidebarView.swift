@@ -39,9 +39,6 @@ struct SidebarView: View {
     
     private var sidebarContent: some View {
         let effectiveProfileId = windowState.currentProfileId ?? browserManager.currentProfile?.id
-        let essentialsCount = effectiveProfileId.map { browserManager.tabManager.essentialTabs(for: $0).count } ?? 0
-
-        let shouldAnimate = (browserManager.activeWindowState?.id == windowState.id) && !browserManager.isTransitioningProfile
 
         let content = VStack(spacing: 8) {
             HStack(spacing: 2) {
@@ -63,22 +60,30 @@ struct SidebarView: View {
 
             URLBarView()
                 .padding(.horizontal, 8)
-            // Container to support PinnedGrid slide transitions without clipping
-            ZStack {
-                PinnedGrid(
-                    width: max(0, effectiveWidth - 16),
-                    profileId: effectiveProfileId
-                )
-                    .environmentObject(windowState)
-            }
-            .padding(.horizontal, 8)
-            .modifier(FallbackDropBelowEssentialsModifier())
 
             if showHistory {
                 historyView
                     .padding(.horizontal, 8)
             } else {
-                spacesScrollView
+                // SINGLE SOURCE OF TRUTH: SwiftUI VStack manages Y positioning
+                // NSPageController is just a dumb container, SwiftUI handles all layout
+                // CRITICAL: Disable ALL SwiftUI animations during profile transitions
+                // This prevents conflicts with NSPageController's internal animations
+                VStack(spacing: 0) {
+                    // Pinned grid area (height calculated automatically)
+                    PinnedGrid(
+                        width: effectiveWidth,
+                        profileId: effectiveProfileId
+                    )
+                    .environmentObject(browserManager)
+                    .environmentObject(windowState)
+                    .animation(browserManager.isTransitioningProfile ? nil : .default, value: effectiveProfileId)
+                    
+                    // NSPageController area (positioned automatically by VStack)
+                    spacesScrollView
+                        .animation(browserManager.isTransitioningProfile ? nil : .default, value: effectiveProfileId)
+                }
+                .animation(browserManager.isTransitioningProfile ? nil : .default, value: browserManager.isTransitioningProfile)
             }
 
             // MARK: - Bottom
@@ -130,7 +135,8 @@ struct SidebarView: View {
         .padding(.top, 8)
         .frame(width: effectiveWidth)
         
-        return content.animation(shouldAnimate ? .easeInOut(duration: 0.18) : nil, value: essentialsCount)
+        // Content is frozen during profile transitions to prevent crashes
+        return content
     }
     
     private var historyView: some View {
@@ -221,6 +227,9 @@ struct SidebarView: View {
 
 
     
+    // Y position management is now handled by SwiftUI's VStack layout system
+    // This eliminates multiple sources of truth and prevents Y position crashes
+
     private func showSpaceCreationDialog() {
         let dialog = SpaceCreationDialog(
             spaceName: $spaceName,

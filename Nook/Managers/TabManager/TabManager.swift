@@ -1719,8 +1719,6 @@ extension TabManager {
             }
         }
 
-        // Trigger UI refresh due to computed pinnedTabs/essentialTabs changes
-        objectWillChange.send()
         // Build the set of visible tabs under the new profile
         let spacePinned = currentSpace.flatMap { spacePinnedTabs(for: $0.id) } ?? []
         let visible = pinnedTabs + spacePinned + tabs
@@ -1731,6 +1729,12 @@ extension TabManager {
         } else {
             // Still notify compositor to update visibility based on new filter
             browserManager?.compositorManager.updateTabVisibility(currentTabId: currentTab?.id)
+        }
+        
+        // CRITICAL: Only trigger UI refresh AFTER profile switch is complete
+        // This prevents EXC_BAD_ACCESS during profile transitions
+        DispatchQueue.main.async { [weak self] in
+            self?.objectWillChange.send()
         }
     }
 }

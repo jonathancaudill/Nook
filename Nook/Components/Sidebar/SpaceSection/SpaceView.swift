@@ -247,7 +247,6 @@ struct SpaceView: View {
                                 )
                         }
                     }
-                    .animation(.easeInOut(duration: 0.15), value: tabs.count)
                 }
                 // Fallback drop target that covers the entire scroll area, including
                 // the large empty region below the last tab. Drops here append to end.

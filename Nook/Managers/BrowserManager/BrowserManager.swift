@@ -319,6 +319,8 @@ class BrowserManager: ObservableObject {
     @Published var currentProfile: Profile?
     // Indicates an in-progress animated profile transition for coordinating UI
     @Published var isTransitioningProfile: Bool = false
+    // Indicates an in-progress space transition to prevent profile switching conflicts
+    @Published var isSpaceTransitioning: Bool = false
     // Migration state
     @Published var migrationProgress: MigrationProgress?
     @Published var isMigrationInProgress: Bool = false
@@ -363,6 +365,9 @@ class BrowserManager: ObservableObject {
     private var savedSidebarWidth: CGFloat = 250
     private let userDefaults = UserDefaults.standard
     var isSwitchingProfile: Bool = false
+    
+    // Deferred profile switches during space transitions
+    private var deferredProfileSwitches: [(windowState: BrowserWindowState, context: ProfileSwitchContext)] = []
     
     // Compositor container view
     func setCompositorContainerView(_ view: NSView?, for windowId: UUID) {
@@ -448,6 +453,12 @@ class BrowserManager: ObservableObject {
     private func adoptProfileIfNeeded(for windowState: BrowserWindowState, context: ProfileSwitchContext) {
         guard let targetProfileId = windowState.currentProfileId else { return }
         guard !isSwitchingProfile else { return }
+        guard !isSpaceTransitioning else { 
+            print("⏳ [BrowserManager] Deferring profile switch during space transition")
+            // Queue the profile switch for later
+            deferredProfileSwitches.append((windowState: windowState, context: context))
+            return 
+        }
         guard currentProfile?.id != targetProfileId else { return }
         guard let targetProfile = profileManager.profiles.first(where: { $0.id == targetProfileId }) else { return }
         Task { [weak self] in
@@ -457,6 +468,19 @@ class BrowserManager: ObservableObject {
                     self?.activeWindowState?.currentProfileId = targetProfileId
                 }
             }
+        }
+    }
+    
+    /// Process any deferred profile switches after space transition ends
+    func processDeferredProfileSwitches() {
+        guard !isSpaceTransitioning else { return }
+        
+        let switches = deferredProfileSwitches
+        deferredProfileSwitches.removeAll()
+        
+        for (windowState, context) in switches {
+            print("🔄 [BrowserManager] Processing deferred profile switch for window \(windowState.id)")
+            adoptProfileIfNeeded(for: windowState, context: context)
         }
     }
 

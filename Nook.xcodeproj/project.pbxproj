@@ -163,6 +163,7 @@
 		2CC067BF2E789ECB001D37C6 /* CookieModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CC066D62E789ECB001D37C6 /* CookieModels.swift */; };
 		2CC067C02E789ECB001D37C6 /* SettingsManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CC066C92E789ECB001D37C6 /* SettingsManager.swift */; };
 		2CC067C12E789ECB001D37C6 /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CC066962E789ECB001D37C6 /* SidebarView.swift */; };
+		2CC067C12E789ECB001D37C8 /* SpacePager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CC0669A2E789ECB001D37C7 /* SpacePager.swift */; };
 		2CC067C22E789ECB001D37C6 /* TabCompositorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CC066422E789ECB001D37C6 /* TabCompositorView.swift */; };
 		2CC067C32E789ECB001D37C6 /* SettingsDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CC066AC2E789ECB001D37C6 /* SettingsDialog.swift */; };
 		2CC067C42E789ECB001D37C6 /* Space.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CC066E22E789ECB001D37C6 /* Space.swift */; };
@@ -260,6 +261,7 @@
 		2CC066942E789ECB001D37C6 /* SidebarHoverOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarHoverOverlayView.swift; sourceTree = "<group>"; };
 		2CC066952E789ECB001D37C6 /* SidebarResizeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarResizeView.swift; sourceTree = "<group>"; };
 		2CC066962E789ECB001D37C6 /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
+		2CC0669A2E789ECB001D37C7 /* SpacePager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpacePager.swift; sourceTree = "<group>"; };
 		2CC066972E789ECB001D37C6 /* URLBarFramePreferenceKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLBarFramePreferenceKey.swift; sourceTree = "<group>"; };
 		2CC066982E789ECB001D37C6 /* URLBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLBarView.swift; sourceTree = "<group>"; };
 		2CC0669A2E789ECB001D37C6 /* OAuthAssistBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OAuthAssistBanner.swift; sourceTree = "<group>"; };
@@ -598,6 +600,7 @@
 				2CC066942E789ECB001D37C6 /* SidebarHoverOverlayView.swift */,
 				2CC066952E789ECB001D37C6 /* SidebarResizeView.swift */,
 				2CC066962E789ECB001D37C6 /* SidebarView.swift */,
+				2CC0669A2E789ECB001D37C7 /* SpacePager.swift */,
 				2CC066972E789ECB001D37C6 /* URLBarFramePreferenceKey.swift */,
 				2CC066982E789ECB001D37C6 /* URLBarView.swift */,
 			);
@@ -1329,6 +1332,7 @@
 				2CC067BF2E789ECB001D37C6 /* CookieModels.swift in Sources */,
 				2CC067C02E789ECB001D37C6 /* SettingsManager.swift in Sources */,
 				2CC067C12E789ECB001D37C6 /* SidebarView.swift in Sources */,
+				2CC067C12E789ECB001D37C8 /* SpacePager.swift in Sources */,
 				2CC067C22E789ECB001D37C6 /* TabCompositorView.swift in Sources */,
 				2CC067C32E789ECB001D37C6 /* SettingsDialog.swift in Sources */,
 				2CC067C42E789ECB001D37C6 /* Space.swift in Sources */,

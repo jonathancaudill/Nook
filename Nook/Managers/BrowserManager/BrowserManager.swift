@@ -690,7 +690,7 @@ class BrowserManager: ObservableObject {
             }
 
             if animateTransition {
-                withAnimation(.easeInOut(duration: 0.35)) {
+                withAnimation(.easeInOut(duration: 0.95)) {
                     performUpdates()
                 }
             } else {
@@ -703,7 +703,7 @@ class BrowserManager: ObservableObject {
             }
 
             if animateTransition {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.95) {
                     self.isTransitioningProfile = false
                 }
             }

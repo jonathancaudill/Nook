@@ -53,56 +53,49 @@ struct PinnedGrid: View {
             )
         }
         
-        return AnyView(ZStack { // Container to support transitions
-            VStack(spacing: 6) {
-                ZStack(alignment: .top) {
-                    LazyVGrid(columns: columns, alignment: .center, spacing: rowSpacing) {
-                        ForEach(Array(items.enumerated()), id: \.element.id) { index, tab in
-                            let isActive: Bool = (browserManager.currentTab(for: windowState)?.id == tab.id)
-                            let title: String = safeTitle(tab)
+        return AnyView(
+            LazyVGrid(columns: columns, alignment: .center, spacing: rowSpacing) {
+                ForEach(Array(items.enumerated()), id: \.element.id) { index, tab in
+                    let isActive: Bool = (browserManager.currentTab(for: windowState)?.id == tab.id)
+                    let title: String = safeTitle(tab)
 
-                            PinnedTile(
-                                title: title,
-                                urlString: tab.url.absoluteString,
-                                icon: tab.favicon,
-                                isActive: isActive,
-                                onActivate: { browserManager.selectTab(tab, in: windowState) },
-                                onClose: { browserManager.tabManager.removeTab(tab.id) },
-                                onRemovePin: { browserManager.tabManager.unpinTab(tab) },
-                                onSplitRight: { browserManager.splitManager.enterSplit(with: tab, placeOn: .right, in: windowState) },
-                                onSplitLeft: { browserManager.splitManager.enterSplit(with: tab, placeOn: .left, in: windowState) }
-                            )
-                            .onTabDrag(tab.id, draggedItem: $draggedItem)
-                            .opacity(draggedItem == tab.id ? 0.0 : 1.0)
-                            .onDrop(
-                                of: [.text],
-                                delegate: SidebarTabDropDelegateSimple(
-                                    item: tab,
-                                    draggedItem: $draggedItem,
-                                    targetSection: .essentials,
-                                    tabManager: browserManager.tabManager
-                                )
-                            )
-                            
-                        }
-                    }
-                    // Section-level drop for empty grid or background
+                    PinnedTile(
+                        title: title,
+                        urlString: tab.url.absoluteString,
+                        icon: tab.favicon,
+                        isActive: isActive,
+                        onActivate: { browserManager.selectTab(tab, in: windowState) },
+                        onClose: { browserManager.tabManager.removeTab(tab.id) },
+                        onRemovePin: { browserManager.tabManager.unpinTab(tab) },
+                        onSplitRight: { browserManager.splitManager.enterSplit(with: tab, placeOn: .right, in: windowState) },
+                        onSplitLeft: { browserManager.splitManager.enterSplit(with: tab, placeOn: .left, in: windowState) }
+                    )
+                    .onTabDrag(tab.id, draggedItem: $draggedItem)
+                    .opacity(draggedItem == tab.id ? 0.0 : 1.0)
                     .onDrop(
                         of: [.text],
-                        delegate: SidebarSectionDropDelegateSimple(
-                            itemsCount: { items.count },
+                        delegate: SidebarTabDropDelegateSimple(
+                            item: tab,
                             draggedItem: $draggedItem,
                             targetSection: .essentials,
                             tabManager: browserManager.tabManager
                         )
                     )
                 }
-                .contentShape(Rectangle())
-                .fixedSize(horizontal: false, vertical: true)
             }
-            // Natural updates; avoid cross-profile transition artifacts
-        }
-        .allowsHitTesting(!browserManager.isTransitioningProfile)
+            .contentShape(Rectangle())
+            .fixedSize(horizontal: false, vertical: true)
+            // Section-level drop for empty grid or background
+            .onDrop(
+                of: [.text],
+                delegate: SidebarSectionDropDelegateSimple(
+                    itemsCount: { items.count },
+                    draggedItem: $draggedItem,
+                    targetSection: .essentials,
+                    tabManager: browserManager.tabManager
+                )
+            )
+            .allowsHitTesting(!browserManager.isTransitioningProfile)
         )
     }
     

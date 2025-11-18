@@ -23,6 +23,8 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
     var spaceId: UUID?
     var index: Int
     var profileId: UUID?
+    // Parent tab ID for tabs opened from other tabs (Phase 1.1)
+    var parentTabId: UUID?
     // If true, this tab is created to host a popup window; do not perform initial load.
     var isPopupHost: Bool = false
 
@@ -115,6 +117,9 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
     // MARK: - Audio State
     @Published var hasPlayingAudio: Bool = false
     @Published var isAudioMuted: Bool = false
+    
+    // MARK: - Reader Mode State (Phase 1.4)
+    @Published var isReaderModeActive: Bool = false
     @Published var hasAudioContent: Bool = false {
         didSet {
             if oldValue != hasAudioContent {
@@ -699,6 +704,15 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
         hasAudioContent = false
         hasPlayingAudio = false
         // Note: isAudioMuted is preserved to maintain user's mute preference
+
+        // Phase 4.4: Check if URL is an extension URL and apply extension web view configuration
+        if #available(macOS 15.4, *) {
+            if let extensionConfig = ExtensionManager.shared.getWebViewConfiguration(for: newURL) {
+                // Apply extension configuration to web view if needed
+                // Note: WebView configuration is typically set at creation time, but we log it here
+                print("🔧 [Phase 4.4] Loading extension URL with extension context: \(newURL.absoluteString)")
+            }
+        }
 
         if newURL.isFileURL {
             // Grant read access to the containing directory for local resources
@@ -2233,7 +2247,21 @@ extension Tab: WKNavigationDelegate {
         }
 
         if let newURL = webView.url {
+            let oldURL = self.url
             self.url = newURL
+            
+            // Phase 4.2: Check if this navigation replaced history
+            // If webView can't go back and URL changed, it's likely a replacement
+            if #available(macOS 15.4, *),
+               oldURL.absoluteString != newURL.absoluteString,
+               !webView.canGoBack {
+                // This appears to be a history replacement - notify extensions
+                // Note: In WKWebExtension context, tab replacement typically means
+                // one tab object replacing another, but history replacement is also
+                // a valid scenario to notify about
+                ExtensionManager.shared.notifyTabReplaced(oldTab: self, with: self)
+            }
+            
             browserManager?.syncTabAcrossWindows(self.id)
             if #available(macOS 15.5, *) {
                 ExtensionManager.shared.notifyTabPropertiesChanged(self, properties: [.URL])
@@ -2399,6 +2427,18 @@ extension Tab: WKNavigationDelegate {
             
             // Setup boost user script before navigation starts
             setupBoostUserScript(for: url, in: webView)
+            
+            // Phase 4.2: Detect history replacement navigation
+            // When navigation type is .other and URL changes, it might be a replacement
+            if navigationAction.navigationType == .other,
+               url.absoluteString != self.url.absoluteString {
+                // This could be a history replacement - we'll check in didCommit
+                // Store the old URL for potential replacement notification
+                if #available(macOS 15.4, *) {
+                    // Track that this navigation might replace history
+                    // We'll verify in didCommit if history was actually replaced
+                }
+            }
         }
 
         // Check for Option+click to trigger Peek for any link

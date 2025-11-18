@@ -11,6 +11,36 @@ import SwiftData
 import SwiftUI
 import WebKit
 
+// MARK: - Popover Delegate for Action Popup Lifecycle (Phase 5.3)
+
+@available(macOS 15.4, *)
+@MainActor
+final class ExtensionActionPopoverDelegate: NSObject, NSPopoverDelegate {
+    weak var action: WKWebExtension.Action?
+    let extensionId: String
+    weak var extensionManager: ExtensionManager?
+    
+    init(action: WKWebExtension.Action, extensionId: String, extensionManager: ExtensionManager) {
+        self.action = action
+        self.extensionId = extensionId
+        self.extensionManager = extensionManager
+        super.init()
+    }
+    
+    func popoverDidClose(_ notification: Notification) {
+        print("🔐 [Phase 5.3] Popover closed for extension: \(extensionId)")
+        
+        // Call action.closePopup() as required by Phase 5.3
+        if #available(macOS 15.5, *), let action = action {
+            action.closePopup()
+            print("   Called action.closePopup()")
+        }
+        
+        // Clean up via ExtensionManager
+        extensionManager?.closeExtensionPopup(for: extensionId)
+    }
+}
+
 @available(macOS 15.4, *)
 @MainActor
 final class ExtensionManager: NSObject, ObservableObject,
@@ -32,10 +62,46 @@ final class ExtensionManager: NSObject, ObservableObject,
     private var tabAdapters: [UUID: ExtensionTabAdapter] = [:]
     internal var windowAdapter: ExtensionWindowAdapter?
     private weak var browserManagerRef: BrowserManager?
+    // Store action references per extension for update tracking
+    private var extensionActions: [String: WKWebExtension.Action] = [:]
+    // Phase 3.2: Command handlers per extension
+    private var commandHandlers: [String: ExtensionCommandHandler] = [:]
+    // Phase 3.4: User gesture tracking per tab
+    private var activeUserGestures: [UUID: Date] = [:]
+    // Phase 3.6: Permission expiration dates [extensionId: [permission/matchPattern: expirationDate]]
+    private var permissionExpirations: [String: [String: Date]] = [:]
+    // Phase 3.9: Extension errors [extensionId: [WKWebExtension.Error]]
+    @Published var extensionErrors: [String: [WKWebExtension.Error]] = [:]
     // Whether to auto-resize extension action popovers to content. Disabled per UX preference.
     private let shouldAutoSizeActionPopups: Bool = false
 
     // No preference for action popups-as-tabs; keep native popovers per Apple docs
+
+    // Phase 5: Popup lifecycle management
+    private var activePopovers: [String: NSPopover] = [:]
+    private var popupWebViews: [String: WKWebView] = [:]
+    private var popoverDelegates: [String: ExtensionActionPopoverDelegate] = [:]
+    
+    // Phase 12.2: Icon caching [extensionId: [NSSize: NSImage]]
+    private var iconCache: [String: [NSSize: NSImage]] = [:]
+    
+    // Phase 13.2: Performance optimization caches
+    // Property cache with TTL [extensionId: (properties: [String: Any], timestamp: Date)]
+    private var propertyCache: [String: (properties: [String: Any], timestamp: Date)] = [:]
+    private let propertyCacheTTL: TimeInterval = 30.0 // 30 seconds
+    
+    // Tab/window list cache with TTL
+    private var tabListCache: (tabs: [ExtensionTabAdapter], timestamp: Date)?
+    private var windowListCache: (windows: [ExtensionWindowAdapter], timestamp: Date)?
+    private let listCacheTTL: TimeInterval = 5.0 // 5 seconds
+    
+    // Permission status cache [extensionId: [permission: (status: WKWebExtensionContext.PermissionStatus, timestamp: Date)]]
+    private var permissionStatusCache: [String: [String: (status: WKWebExtensionContext.PermissionStatus, timestamp: Date)]] = [:]
+    private let permissionCacheTTL: TimeInterval = 10.0 // 10 seconds
+    
+    // Pending permission updates for batching [extensionId: Set<WKWebExtension.Permission>]
+    private var pendingPermissionUpdates: [String: Set<WKWebExtension.Permission>] = [:]
+    private var permissionUpdateTimer: Timer?
 
     let context: ModelContext
 
@@ -52,6 +118,15 @@ final class ExtensionManager: NSObject, ObservableObject,
         if isExtensionSupportAvailable {
             setupExtensionController()
             loadInstalledExtensions()
+            
+            // Phase 3.6: Set up periodic expiration checking
+            setupPermissionExpirationChecking()
+            
+            // Phase 3.8: Set up notification observers
+            setupContextNotificationObservers()
+            
+            // Phase 3.9: Set up periodic error checking
+            setupErrorMonitoring()
         }
     }
 
@@ -73,6 +148,23 @@ final class ExtensionManager: NSObject, ObservableObject,
             }
         }
         optionsWindows.removeAll()
+
+        // Close all active popovers
+        for (_, popover) in activePopovers {
+            Task { @MainActor in
+                popover.close()
+            }
+        }
+        activePopovers.removeAll()
+
+        // Clean up popup WebViews
+        for (_, webView) in popupWebViews {
+            Task { @MainActor in
+                // Remove extension controller reference to break circular references
+                webView.configuration.webExtensionController = nil
+            }
+        }
+        popupWebViews.removeAll()
 
         // Clean up window adapter
         windowAdapter = nil
@@ -605,6 +697,12 @@ final class ExtensionManager: NSObject, ObservableObject,
 
         // Store context
         extensionContexts[extensionId] = extensionContext
+        
+        // Phase 3.10: Set unsupported APIs
+        setUnsupportedAPIs(for: extensionContext)
+        
+        // Phase 3.11: Configure inspection settings
+        configureInspectionSettings(for: extensionContext, webExtension: webExtension)
 
         // Load with native controller
         try extensionController?.load(extensionContext)
@@ -628,7 +726,8 @@ final class ExtensionManager: NSObject, ObservableObject,
                 let url = activeTab.url?(for: extensionContext)
             {
                 print("   🔍 Dark Reader can see active tab URL: \(url)")
-                let hasAccess = extensionContext.hasAccess(to: url)
+                // Phase 3.5: Use per-tab permission check
+                let hasAccess = extensionContext.hasAccess(to: url, in: activeTab)
                 print("   🔐 Has access to current URL: \(hasAccess)")
             }
 
@@ -776,6 +875,7 @@ final class ExtensionManager: NSObject, ObservableObject,
                     requestedMatches: requestedMatches,
                     optionalMatches: optionalMatches,
                     extensionDisplayName: displayName,
+                    extensionId: extensionId, // Phase 12.2: Pass extension ID for icon loading
                     onDecision: { grantedPerms, grantedMatches in
                         // Apply permission decisions
                         for p in permissionsNeedingConsent.union(
@@ -819,7 +919,7 @@ final class ExtensionManager: NSObject, ObservableObject,
                     },
                     extensionLogo: extensionContext.webExtension.icon(
                         for: .init(width: 64, height: 64)
-                    ) ?? NSImage()
+                    ) // Phase 12.2: Pass nil to allow dynamic loading
                 )
             } else {
                 print(
@@ -893,6 +993,9 @@ final class ExtensionManager: NSObject, ObservableObject,
     func disableExtension(_ extensionId: String) {
         guard let context = extensionContexts[extensionId] else { return }
 
+        // Close popup for this extension before unloading
+        closeExtensionPopup(for: extensionId)
+
         do {
             try extensionController?.unload(context)
             updateExtensionEnabled(extensionId, enabled: false)
@@ -906,6 +1009,9 @@ final class ExtensionManager: NSObject, ObservableObject,
     /// Disable all extensions (used when experimental extension support is disabled)
     func disableAllExtensions() {
         print("🔌 [ExtensionManager] Disabling all extensions...")
+
+        // Close all extension popups first
+        closeAllExtensionPopups()
 
         let enabledExtensions = installedExtensions.filter { $0.isEnabled }
 
@@ -958,7 +1064,16 @@ final class ExtensionManager: NSObject, ObservableObject,
                 )
             }
             extensionContexts.removeValue(forKey: extensionId)
+            
+            // Phase 12.2: Clear icon cache
+            clearIconCache(for: extensionId)
+            
+            // Phase 13.2: Invalidate all caches
+            invalidateAllCaches()
         }
+        
+        // Clean up action reference (Phase 2.1)
+        extensionActions.removeValue(forKey: extensionId)
 
         // Remove from database and filesystem
         do {
@@ -1134,7 +1249,20 @@ final class ExtensionManager: NSObject, ObservableObject,
                                 }
 
                                 extensionContexts[entity.id] = extensionContext
+                                
+                                // Phase 3.10: Set unsupported APIs
+                                setUnsupportedAPIs(for: extensionContext)
+                                
+                                // Phase 3.11: Configure inspection settings
+                                configureInspectionSettings(for: extensionContext, webExtension: webExtension)
+                                
                                 try extensionController?.load(extensionContext)
+                                
+                                // Phase 3.1: Load background content if needed
+                                loadBackgroundContent(for: entity.id, extensionContext: extensionContext, webExtension: webExtension)
+                                
+                                // Phase 3.2: Set up command handler
+                                setupCommandHandler(for: entity.id, extensionContext: extensionContext)
 
                                 // If extension defines requested/optional permissions but none decided yet, prompt.
                                 if extensionContext.currentPermissions.isEmpty
@@ -1164,6 +1292,7 @@ final class ExtensionManager: NSObject, ObservableObject,
                                             .webExtension
                                             .optionalPermissionMatchPatterns,
                                         extensionDisplayName: displayName,
+                                        extensionId: self.getExtensionId(from: extensionContext), // Phase 12.2: Get extension ID
                                         onDecision: {
                                             grantedPerms,
                                             grantedMatches in
@@ -1231,7 +1360,7 @@ final class ExtensionManager: NSObject, ObservableObject,
                                                     width: 64,
                                                     height: 64
                                                 )
-                                            ) ?? NSImage()
+                                            ) // Phase 12.2: Pass nil to allow dynamic loading
                                     )
                                 }
                             } catch {
@@ -1274,14 +1403,761 @@ final class ExtensionManager: NSObject, ObservableObject,
     // MARK: - Native Extension Access
 
     /// Get the native WKWebExtensionContext for an extension
-    func getExtensionContext(for extensionId: String) -> WKWebExtensionContext?
-    {
-        return extensionContexts[extensionId]
+
+    /// Get the native WKWebExtensionAction for an extension (Phase 2.1)
+    @available(macOS 15.5, *)
+    func getExtensionAction(for extensionId: String) -> WKWebExtension.Action? {
+        return extensionActions[extensionId]
     }
 
     /// Get the native WKWebExtensionController
     var nativeController: WKWebExtensionController? {
         return extensionController
+    }
+    
+    // MARK: - Phase 3.1: Background Content Loading
+    
+    /// Load background content for an extension if it has background content
+    private func loadBackgroundContent(for extensionId: String, extensionContext: WKWebExtensionContext, webExtension: WKWebExtension) {
+        // Check if extension has background content
+        guard webExtension.hasBackgroundContent else {
+            return
+        }
+        
+        print("🔄 [Phase 3.1] Loading background content for extension: \(webExtension.displayName ?? extensionId)")
+        
+        extensionContext.loadBackgroundContent { [weak self] error in
+            if let error = error {
+                print("❌ [Phase 3.1] Failed to load background content for extension '\(extensionId)': \(error.localizedDescription)")
+            } else {
+                print("✅ [Phase 3.1] Successfully loaded background content for extension: \(webExtension.displayName ?? extensionId)")
+            }
+        }
+    }
+    
+    // MARK: - Phase 3.2: Command Handling
+    
+    /// Set up command handler for an extension
+    private func setupCommandHandler(for extensionId: String, extensionContext: WKWebExtensionContext) {
+        let handler = ExtensionCommandHandler(extensionContext: extensionContext, extensionId: extensionId)
+        // Phase 6: Set extension manager reference for context access
+        handler.extensionManager = self
+        commandHandlers[extensionId] = handler
+        print("⌨️ [Phase 3.2] Set up command handler for extension: \(extensionId)")
+        
+        // Phase 6: Update menu after a short delay to allow commands to be registered
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+            if #available(macOS 15.4, *) {
+                updateExtensionCommandsMenu()
+            }
+        }
+    }
+    
+    /// Get command handler for an extension
+    func getCommandHandler(for extensionId: String) -> ExtensionCommandHandler? {
+        return commandHandlers[extensionId]
+    }
+    
+    /// Phase 6: Get all extension commands organized by extension for menu integration
+    @available(macOS 15.4, *)
+    func getAllExtensionCommands() -> [(extensionId: String, extensionName: String, handler: ExtensionCommandHandler)] {
+        var result: [(extensionId: String, extensionName: String, handler: ExtensionCommandHandler)] = []
+        
+        for (extensionId, handler) in commandHandlers {
+            // Get extension name from installed extensions
+            if let installedExtension = installedExtensions.first(where: { $0.id == extensionId }) {
+                result.append((extensionId: extensionId, extensionName: installedExtension.name, handler: handler))
+            } else {
+                // Fallback to extension ID if name not found
+                result.append((extensionId: extensionId, extensionName: extensionId, handler: handler))
+            }
+        }
+        
+        return result.sorted(by: { $0.extensionName < $1.extensionName })
+    }
+    
+    /// Phase 6: Update the application menu with extension commands
+    @available(macOS 15.4, *)
+    func updateExtensionCommandsMenu() {
+        guard let appMenu = NSApp.mainMenu else { return }
+        
+        // Find or create Extensions menu
+        var extensionsMenuItem: NSMenuItem?
+        var extensionsMenu: NSMenu?
+        
+        // Look for existing Extensions menu
+        if let existingItem = appMenu.item(withTitle: "Extensions") {
+            extensionsMenuItem = existingItem
+            extensionsMenu = existingItem.submenu
+        } else {
+            // Create new Extensions menu
+            extensionsMenuItem = NSMenuItem(title: "Extensions", action: nil, keyEquivalent: "")
+            extensionsMenu = NSMenu(title: "Extensions")
+            extensionsMenuItem?.submenu = extensionsMenu
+            // Insert before Window menu if it exists, otherwise at the end
+            if let windowIndex = appMenu.items.firstIndex(where: { $0.title == "Window" }) {
+                appMenu.insertItem(extensionsMenuItem!, at: windowIndex)
+            } else {
+                appMenu.addItem(extensionsMenuItem!)
+            }
+        }
+        
+        guard let menu = extensionsMenu else { return }
+        
+        // Remove existing extension command items (keep non-command items like "Install Extension...")
+        let itemsToRemove = menu.items.filter { item in
+            // Keep items that don't have representedObject set to a command identifier
+            // or items that are dividers
+            if item.isSeparatorItem { return false }
+            if item.representedObject is String {
+                // Check if it's a command identifier (starts with extension ID pattern)
+                return true
+            }
+            return false
+        }
+        for item in itemsToRemove {
+            menu.removeItem(item)
+        }
+        
+        // Add extension commands organized by extension
+        let allCommands = getAllExtensionCommands()
+        
+        for (extensionId, extensionName, handler) in allCommands {
+            let menuItems = handler.getAllMenuItems()
+            
+            if !menuItems.isEmpty {
+                // Add divider before extension group if not first
+                if menu.items.count > 0 && !menu.items.last!.isSeparatorItem {
+                    menu.addItem(NSMenuItem.separator())
+                }
+                
+                // Add extension submenu or individual items
+                if menuItems.count > 1 {
+                    // Multiple commands: create submenu
+                    let extensionSubmenuItem = handler.getMenuItemsForExtension(extensionName: extensionName)
+                    menu.addItem(extensionSubmenuItem)
+                } else {
+                    // Single command: add directly
+                    for menuItem in menuItems {
+                        menu.addItem(menuItem)
+                    }
+                }
+            }
+        }
+        
+        print("⌨️ [Phase 6] Updated extension commands menu with \(allCommands.count) extensions")
+    }
+    
+    // MARK: - Phase 3.3: Context Menu Items
+    
+    /// Get context menu items for a tab from all loaded extensions
+    func getContextMenuItems(for tab: Tab) -> [NSMenuItem] {
+        guard let tabAdapter = stableAdapter(for: tab) else {
+            return []
+        }
+        
+        var allMenuItems: [NSMenuItem] = []
+        
+        // Get menu items from all loaded extension contexts
+        for (extensionId, extensionContext) in extensionContexts {
+            let menuItems = extensionContext.menuItems(for: tabAdapter)
+            
+            // Add separator before extension items if we have items already
+            if !allMenuItems.isEmpty && !menuItems.isEmpty {
+                allMenuItems.append(NSMenuItem.separator())
+            }
+            
+            // Add extension name as section header if multiple extensions
+            if extensionContexts.count > 1 && !menuItems.isEmpty {
+                let headerItem = NSMenuItem(
+                    title: extensionContext.webExtension.displayName ?? extensionId,
+                    action: nil,
+                    keyEquivalent: ""
+                )
+                headerItem.isEnabled = false
+                allMenuItems.append(headerItem)
+            }
+            
+            // Add menu items from this extension
+            allMenuItems.append(contentsOf: menuItems)
+        }
+        
+        return allMenuItems
+    }
+    
+    // MARK: - Phase 3.4: User Gesture Tracking
+    
+    /// Record that a user gesture was performed in a tab
+    func userGesturePerformed(in tab: Tab) {
+        guard let tabAdapter = stableAdapter(for: tab) else {
+            return
+        }
+        
+        // Record gesture timestamp
+        activeUserGestures[tab.id] = Date()
+        
+        // Notify all extension contexts
+        for (_, extensionContext) in extensionContexts {
+            extensionContext.userGesturePerformed(in: tabAdapter)
+        }
+        
+        print("👆 [Phase 3.4] User gesture recorded for tab: \(tab.name)")
+    }
+    
+    /// Check if a tab has an active user gesture
+    func hasActiveUserGesture(in tab: Tab) -> Bool {
+        guard let tabAdapter = stableAdapter(for: tab) else {
+            return false
+        }
+        
+        // Check if any extension context reports an active gesture
+        for (_, extensionContext) in extensionContexts {
+            if extensionContext.hasActiveUserGesture(in: tabAdapter) {
+                return true
+            }
+        }
+        
+        // Also check our internal tracking (gestures expire after 5 seconds)
+        if let gestureTime = activeUserGestures[tab.id],
+           Date().timeIntervalSince(gestureTime) < 5.0 {
+            return true
+        }
+        
+        return false
+    }
+    
+    /// Clear user gesture state for a tab
+    func clearUserGesture(in tab: Tab) {
+        guard let tabAdapter = stableAdapter(for: tab) else {
+            return
+        }
+        
+        activeUserGestures.removeValue(forKey: tab.id)
+        
+        // Clear gesture in all extension contexts
+        for (_, extensionContext) in extensionContexts {
+            extensionContext.clearUserGesture(in: tabAdapter)
+        }
+        
+        print("🧹 [Phase 3.4] User gesture cleared for tab: \(tab.name)")
+    }
+    
+    // MARK: - Phase 3.5: Per-Tab Permission Status Queries
+    
+    /// Check if extension has permission in a specific tab
+    func hasPermission(_ permission: WKWebExtension.Permission, in tab: Tab, for extensionId: String) -> Bool {
+        guard let extensionContext = extensionContexts[extensionId],
+              let tabAdapter = stableAdapter(for: tab) else {
+            return false
+        }
+        return extensionContext.hasPermission(permission, in: tabAdapter)
+    }
+    
+    /// Check if extension has access to URL in a specific tab
+    /// Uses match pattern validation for enhanced logging
+    func hasAccessToURL(_ url: URL, in tab: Tab, for extensionId: String) -> Bool {
+        guard let extensionContext = extensionContexts[extensionId],
+              let tabAdapter = stableAdapter(for: tab) else {
+            return false
+        }
+        
+        let hasAccess = extensionContext.hasAccess(to: url, in: tabAdapter)
+        
+        // Phase 10.1: Log match pattern validation
+        if #available(macOS 15.4, *) {
+            let grantedPatterns = extensionContext.grantedPermissionMatchPatterns
+            for (pattern, _) in grantedPatterns {
+                if ExtensionUtils.urlMatchesPattern(url, pattern: pattern) {
+                    print("✅ [Phase 10.1] URL \(url.absoluteString) matches granted pattern: \(pattern.description)")
+                }
+            }
+        }
+        
+        return hasAccess
+    }
+    
+    /// Get permission status for a permission in a specific tab
+    func permissionStatus(for permission: WKWebExtension.Permission, in tab: Tab, for extensionId: String) -> WKWebExtensionContext.PermissionStatus {
+        guard let extensionContext = extensionContexts[extensionId],
+              let tabAdapter = stableAdapter(for: tab) else {
+            return .deniedExplicitly
+        }
+        return extensionContext.permissionStatus(for: permission, in: tabAdapter)
+    }
+    
+    /// Get permission status for a match pattern in a specific tab
+    /// Uses match pattern validation for enhanced logging
+    func permissionStatus(for matchPattern: WKWebExtension.MatchPattern, in tab: Tab, for extensionId: String) -> WKWebExtensionContext.PermissionStatus {
+        guard let extensionContext = extensionContexts[extensionId],
+              let tabAdapter = stableAdapter(for: tab) else {
+            return .deniedExplicitly
+        }
+        
+        // Phase 10.1: Validate match pattern before checking status
+        if #available(macOS 15.4, *) {
+            let normalizedPattern = ExtensionUtils.normalizeMatchPattern(matchPattern.description)
+            if normalizedPattern != matchPattern.description {
+                print("ℹ️ [Phase 10.1] Normalized match pattern: \(matchPattern.description) -> \(normalizedPattern)")
+            }
+        }
+        
+        return extensionContext.permissionStatus(for: matchPattern, in: tabAdapter)
+    }
+    
+    // MARK: - Phase 3.6: Permission Expiration Dates
+    
+    /// Set up periodic checking for expired permissions
+    private func setupPermissionExpirationChecking() {
+        // Check for expired permissions every 5 minutes
+        Timer.scheduledTimer(withTimeInterval: 300.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.checkPermissionExpirations()
+            }
+        }
+    }
+    
+    /// Set permission status with optional expiration date
+    func setPermissionStatus(_ status: WKWebExtensionContext.PermissionStatus, for permission: WKWebExtension.Permission, expirationDate: Date? = nil, extensionId: String) {
+        guard let extensionContext = extensionContexts[extensionId] else {
+            return
+        }
+        
+        if let expirationDate = expirationDate {
+            extensionContext.setPermissionStatus(status, for: permission, expirationDate: expirationDate)
+            
+            // Track expiration date
+            if permissionExpirations[extensionId] == nil {
+                permissionExpirations[extensionId] = [:]
+            }
+            permissionExpirations[extensionId]?["permission:\(String(describing: permission))"] = expirationDate
+        } else {
+            extensionContext.setPermissionStatus(status, for: permission)
+        }
+    }
+    
+    /// Set match pattern permission status with optional expiration date
+    func setPermissionStatus(_ status: WKWebExtensionContext.PermissionStatus, for matchPattern: WKWebExtension.MatchPattern, expirationDate: Date? = nil, extensionId: String) {
+        guard let extensionContext = extensionContexts[extensionId] else {
+            return
+        }
+        
+        if let expirationDate = expirationDate {
+            extensionContext.setPermissionStatus(status, for: matchPattern, expirationDate: expirationDate)
+            
+            // Track expiration date
+            if permissionExpirations[extensionId] == nil {
+                permissionExpirations[extensionId] = [:]
+            }
+            permissionExpirations[extensionId]?["matchPattern:\(matchPattern.description)"] = expirationDate
+        } else {
+            extensionContext.setPermissionStatus(status, for: matchPattern)
+        }
+    }
+    
+    /// Check for expired permissions and re-prompt if needed
+    func checkPermissionExpirations() {
+        let now = Date()
+        
+        for (extensionId, expirations) in permissionExpirations {
+            guard let extensionContext = extensionContexts[extensionId] else {
+                continue
+            }
+            
+            var expiredMatchPatterns: Set<WKWebExtension.MatchPattern> = []
+            var keysToRemove: [String] = []
+            
+            for (key, expirationDate) in expirations {
+                if expirationDate < now {
+                    // Permission expired
+                    if key.hasPrefix("permission:") {
+                        print("⏰ [Phase 3.6] Permission expired for extension \(extensionId): \(key)")
+                        keysToRemove.append(key)
+                    } else if key.hasPrefix("matchPattern:") {
+                        let patternString = String(key.dropFirst("matchPattern:".count))
+                        if let matchPattern = try? WKWebExtension.MatchPattern(string: patternString) {
+                            expiredMatchPatterns.insert(matchPattern)
+                            keysToRemove.append(key)
+                        }
+                    }
+                }
+            }
+            
+            // Remove expired entries
+            for key in keysToRemove {
+                permissionExpirations[extensionId]?.removeValue(forKey: key)
+            }
+            
+            // Clear expired match patterns
+            for matchPattern in expiredMatchPatterns {
+                extensionContext.setPermissionStatus(.deniedExplicitly, for: matchPattern)
+                print("⏰ [Phase 3.6] Cleared expired match pattern for extension \(extensionId): \(matchPattern)")
+            }
+        }
+    }
+
+    // MARK: - Phase 3.8: Context Notifications Observation
+    
+    /// Set up NotificationCenter observers for extension context notifications
+    private func setupContextNotificationObservers() {
+        // Note: These notification names may not be available in the current WebKit API
+        // Permission notifications are handled via delegate methods instead
+        // If notifications become available, uncomment and use the correct notification names:
+        /*
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handlePermissionsWereGranted(_:)),
+            name: WKWebExtensionContext.permissionsWereGrantedNotification,
+            object: nil
+        )
+        
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handlePermissionsWereDenied(_:)),
+            name: WKWebExtensionContext.permissionsWereDeniedNotification,
+            object: nil
+        )
+        
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleGrantedPermissionsWereRemoved(_:)),
+            name: WKWebExtensionContext.grantedPermissionsWereRemovedNotification,
+            object: nil
+        )
+        
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleDeniedPermissionsWereRemoved(_:)),
+            name: WKWebExtensionContext.deniedPermissionsWereRemovedNotification,
+            object: nil
+        )
+        
+        // Match pattern permission notifications
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handlePermissionMatchPatternsWereGranted(_:)),
+            name: WKWebExtensionContext.permissionMatchPatternsWereGrantedNotification,
+            object: nil
+        )
+        
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handlePermissionMatchPatternsWereDenied(_:)),
+            name: WKWebExtensionContext.permissionMatchPatternsWereDeniedNotification,
+            object: nil
+        )
+        
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleGrantedPermissionMatchPatternsWereRemoved(_:)),
+            name: WKWebExtensionContext.grantedPermissionMatchPatternsWereRemovedNotification,
+            object: nil
+        )
+        
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleDeniedPermissionMatchPatternsWereRemoved(_:)),
+            name: WKWebExtensionContext.deniedPermissionMatchPatternsWereRemovedNotification,
+            object: nil
+        )
+        
+        // Error notifications
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleErrorsDidUpdate(_:)),
+            name: WKWebExtensionContext.errorsDidUpdateNotification,
+            object: nil
+        )
+        */
+    }
+    
+    @objc private func handlePermissionsWereGranted(_ notification: Notification) {
+        guard let extensionContext = notification.object as? WKWebExtensionContext else { return }
+        if let extensionId = extensionContexts.first(where: { $0.value === extensionContext })?.key {
+            print("✅ [Phase 3.8] Permissions were granted for extension: \(extensionId)")
+            // Update UI if needed
+        }
+    }
+    
+    @objc private func handlePermissionsWereDenied(_ notification: Notification) {
+        guard let extensionContext = notification.object as? WKWebExtensionContext else { return }
+        if let extensionId = extensionContexts.first(where: { $0.value === extensionContext })?.key {
+            print("❌ [Phase 3.8] Permissions were denied for extension: \(extensionId)")
+            // Update UI if needed
+        }
+    }
+    
+    @objc private func handleGrantedPermissionsWereRemoved(_ notification: Notification) {
+        guard let extensionContext = notification.object as? WKWebExtensionContext else { return }
+        if let extensionId = extensionContexts.first(where: { $0.value === extensionContext })?.key {
+            print("🗑️ [Phase 3.8] Granted permissions were removed for extension: \(extensionId)")
+            // Update UI if needed
+        }
+    }
+    
+    @objc private func handleDeniedPermissionsWereRemoved(_ notification: Notification) {
+        guard let extensionContext = notification.object as? WKWebExtensionContext else { return }
+        if let extensionId = extensionContexts.first(where: { $0.value === extensionContext })?.key {
+            print("🔄 [Phase 3.8] Denied permissions were removed for extension: \(extensionId)")
+            // Update UI if needed
+        }
+    }
+    
+    @objc private func handlePermissionMatchPatternsWereGranted(_ notification: Notification) {
+        guard let extensionContext = notification.object as? WKWebExtensionContext else { return }
+        if let extensionId = extensionContexts.first(where: { $0.value === extensionContext })?.key {
+            print("✅ [Phase 3.8] Permission match patterns were granted for extension: \(extensionId)")
+            // Update UI if needed
+        }
+    }
+    
+    @objc private func handlePermissionMatchPatternsWereDenied(_ notification: Notification) {
+        guard let extensionContext = notification.object as? WKWebExtensionContext else { return }
+        if let extensionId = extensionContexts.first(where: { $0.value === extensionContext })?.key {
+            print("❌ [Phase 3.8] Permission match patterns were denied for extension: \(extensionId)")
+            // Update UI if needed
+        }
+    }
+    
+    @objc private func handleGrantedPermissionMatchPatternsWereRemoved(_ notification: Notification) {
+        guard let extensionContext = notification.object as? WKWebExtensionContext else { return }
+        if let extensionId = extensionContexts.first(where: { $0.value === extensionContext })?.key {
+            print("🗑️ [Phase 3.8] Granted permission match patterns were removed for extension: \(extensionId)")
+            // Update UI if needed
+        }
+    }
+    
+    @objc private func handleDeniedPermissionMatchPatternsWereRemoved(_ notification: Notification) {
+        guard let extensionContext = notification.object as? WKWebExtensionContext else { return }
+        if let extensionId = extensionContexts.first(where: { $0.value === extensionContext })?.key {
+            print("🔄 [Phase 3.8] Denied permission match patterns were removed for extension: \(extensionId)")
+            // Update UI if needed
+        }
+    }
+    
+    @objc private func handleErrorsDidUpdate(_ notification: Notification) {
+        guard let extensionContext = notification.object as? WKWebExtensionContext else { return }
+        if let extensionId = extensionContexts.first(where: { $0.value === extensionContext })?.key {
+            let errors: [WKWebExtension.Error] = extensionContext.errors.compactMap { $0 as? WKWebExtension.Error }
+            extensionErrors[extensionId] = errors.isEmpty ? nil : errors
+            if !errors.isEmpty {
+                print("⚠️ [Phase 13.1] Extension errors updated for extension: \(extensionId)")
+                // Phase 13.1: Use error handler for logging
+                for error in errors {
+                    ExtensionUtils.ExtensionErrorHandler.logError(error, extensionId: extensionId)
+                }
+            }
+        }
+    }
+    
+    // MARK: - Phase 3.9: Context Error Monitoring
+    
+    /// Periodically check for extension errors
+    private func checkExtensionErrors() {
+        for (extensionId, extensionContext) in extensionContexts {
+            let errors: [WKWebExtension.Error] = extensionContext.errors.compactMap { $0 as? WKWebExtension.Error }
+            extensionErrors[extensionId] = errors.isEmpty ? nil : errors
+            
+            // Phase 13.1: Log errors with proper severity
+            if !errors.isEmpty {
+                for error in errors {
+                    ExtensionUtils.ExtensionErrorHandler.logError(error, extensionId: extensionId)
+                }
+            }
+        }
+    }
+    
+    /// Get errors for a specific extension
+    func getErrors(for extensionId: String) -> [WKWebExtension.Error] {
+        return extensionErrors[extensionId] ?? []
+    }
+    
+    /// Clear errors for a specific extension
+    func clearErrors(for extensionId: String) {
+        extensionErrors[extensionId] = nil
+    }
+    
+    // MARK: - Phase 13.1: Error Recovery
+    
+    /// Attempt to recover from an error for a specific extension
+    /// - Parameters:
+    ///   - error: The error to recover from
+    ///   - extensionId: The extension ID
+    @available(macOS 15.4, *)
+    func attemptErrorRecovery(for error: WKWebExtension.Error, extensionId: String) {
+        guard ExtensionUtils.ExtensionErrorHandler.shouldRecover(from: error) else {
+            print("⚠️ [Phase 13.1] Error is not recoverable: \(error.localizedDescription)")
+            return
+        }
+        
+        let errorDescription = error.localizedDescription.lowercased()
+        
+        // Phase 13.1: Handle different error types
+        if errorDescription.contains("load") || errorDescription.contains("context") {
+            // Try to reload the extension
+            print("🔄 [Phase 13.1] Attempting to reload extension: \(extensionId)")
+            if let context = extensionContexts[extensionId] {
+                // Unload and reload
+                do {
+                    try extensionController?.unload(context)
+                    // Small delay before reload
+                    Task {
+                        try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+                        await MainActor.run {
+                            do {
+                                try self.extensionController?.load(context)
+                                print("✅ [Phase 13.1] Successfully reloaded extension: \(extensionId)")
+                            } catch {
+                                print("❌ [Phase 13.1] Failed to reload extension: \(error.localizedDescription)")
+                            }
+                        }
+                    }
+                } catch {
+                    print("❌ [Phase 13.1] Failed to unload extension for recovery: \(error.localizedDescription)")
+                }
+            }
+        } else if errorDescription.contains("permission") {
+            // Permission errors - user needs to grant permissions
+            print("ℹ️ [Phase 13.1] Permission error - user action required for extension: \(extensionId)")
+            // Could trigger permission prompt here if needed
+        } else if errorDescription.contains("network") || errorDescription.contains("connection") {
+            // Network errors - just log, user needs to fix connection
+            print("ℹ️ [Phase 13.1] Network error - check connection for extension: \(extensionId)")
+        }
+    }
+    
+    /// Attempt to recover from all recoverable errors for an extension
+    /// - Parameter extensionId: The extension ID
+    @available(macOS 15.4, *)
+    func attemptAllErrorRecoveries(for extensionId: String) {
+        guard let errors = extensionErrors[extensionId] else { return }
+        
+        for error in errors where ExtensionUtils.ExtensionErrorHandler.shouldRecover(from: error) {
+            attemptErrorRecovery(for: error, extensionId: extensionId)
+        }
+    }
+    
+    /// Set up periodic error monitoring
+    private func setupErrorMonitoring() {
+        // Check for errors every minute
+        Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.checkExtensionErrors()
+            }
+        }
+        // Initial check
+        checkExtensionErrors()
+    }
+    
+    // MARK: - Phase 3.10: Context Unsupported APIs
+    
+    /// Get list of APIs that are not yet supported
+    private func getUnsupportedAPIs() -> Set<String> {
+        // List APIs that we haven't implemented yet
+        // This should be updated as more APIs are implemented
+        var unsupported: Set<String> = []
+        
+        // Add APIs that are known to be unsupported
+        // Note: This is a placeholder - update as implementation progresses
+        // unsupported.insert("chrome.identity.getAuthToken")
+        // unsupported.insert("chrome.identity.removeCachedAuthToken")
+        
+        return unsupported
+    }
+    
+    /// Set unsupported APIs on extension context
+    private func setUnsupportedAPIs(for extensionContext: WKWebExtensionContext) {
+        let unsupported = getUnsupportedAPIs()
+        if !unsupported.isEmpty {
+            extensionContext.unsupportedAPIs = unsupported
+            print("🚫 [Phase 3.10] Set unsupported APIs for extension: \(unsupported.joined(separator: ", "))")
+        }
+    }
+    
+    // MARK: - Phase 3.11: Context Inspection Settings
+    
+    /// Configure inspection settings for an extension context
+    private func configureInspectionSettings(for extensionContext: WKWebExtensionContext, webExtension: WKWebExtension) {
+        // Check user preference for inspectability (default to true for development)
+        let isInspectable = UserDefaults.standard.bool(forKey: "Nook.ExtensionInspectable.\(extensionContext.uniqueIdentifier)")
+        if UserDefaults.standard.object(forKey: "Nook.ExtensionInspectable.\(extensionContext.uniqueIdentifier)") == nil {
+            // Default to true if not set
+            extensionContext.isInspectable = true
+        } else {
+            extensionContext.isInspectable = isInspectable
+        }
+        
+        // Set inspection name for better debugging experience
+        let displayName = webExtension.displayName ?? "Unknown Extension"
+        extensionContext.inspectionName = "Extension: \(displayName)"
+        
+        print("🔍 [Phase 3.11] Configured inspection settings for extension: \(displayName)")
+        print("   Inspectable: \(extensionContext.isInspectable)")
+        print("   Inspection Name: \(extensionContext.inspectionName ?? "nil")")
+    }
+    
+    /// Toggle inspectability for an extension
+    func setInspectable(_ inspectable: Bool, for extensionId: String) {
+        guard let extensionContext = extensionContexts[extensionId] else {
+            return
+        }
+        
+        extensionContext.isInspectable = inspectable
+        UserDefaults.standard.set(inspectable, forKey: "Nook.ExtensionInspectable.\(extensionContext.uniqueIdentifier)")
+        print("🔍 [Phase 3.11] Set inspectable=\(inspectable) for extension: \(extensionId)")
+    }
+    
+    // MARK: - Phase 4.3: Data Record Management
+    
+    /// Fetch all extension data records
+    @available(macOS 15.4, *)
+    func fetchExtensionDataRecords(
+        ofTypes dataTypes: Set<WKWebExtension.DataType>? = nil,
+        completionHandler: @escaping ([WKWebExtension.DataRecord], Error?) -> Void
+    ) {
+        guard let controller = extensionController else {
+            completionHandler([], NSError(domain: "ExtensionManager", code: 1, userInfo: [NSLocalizedDescriptionKey: "Extension controller not available"]))
+            return
+        }
+        
+        // Use provided types or default to all available types
+        let typesToFetch: Set<WKWebExtension.DataType> = dataTypes ?? [
+            .local, .session, .synchronized
+        ]
+        
+        controller.fetchDataRecords(ofTypes: typesToFetch) { dataRecords in
+            print("✅ [Phase 4.3] Fetched \(dataRecords.count) extension data records")
+            completionHandler(dataRecords, nil)
+        }
+    }
+    
+    /// Fetch data record for a specific extension
+    @available(macOS 15.4, *)
+    func fetchExtensionDataRecord(
+        for extensionId: String,
+        ofTypes dataTypes: Set<WKWebExtension.DataType>? = nil,
+        completionHandler: @escaping (WKWebExtension.DataRecord?, Error?) -> Void
+    ) {
+        guard let controller = extensionController,
+              let webExtension = extensionContexts[extensionId]?.webExtension else {
+            completionHandler(nil, NSError(domain: "ExtensionManager", code: 1, userInfo: [NSLocalizedDescriptionKey: "Extension not found"]))
+            return
+        }
+        
+        // Use provided types or default to all available types
+        let typesToFetch: Set<WKWebExtension.DataType> = dataTypes ?? [
+            .local, .session, .synchronized
+        ]
+        
+        guard let extensionContext = extensionContexts[extensionId] else {
+            completionHandler(nil, NSError(domain: "ExtensionManager", code: 1, userInfo: [NSLocalizedDescriptionKey: "Extension context not found"]))
+            return
+        }
+        
+        controller.fetchDataRecord(ofTypes: typesToFetch, for: extensionContext) { dataRecord in
+            print("✅ [Phase 4.3] Fetched data record for extension: \(extensionId)")
+            completionHandler(dataRecord, nil)
+        }
     }
 
     // MARK: - Debugging Utilities
@@ -1308,6 +2184,12 @@ final class ExtensionManager: NSObject, ObservableObject,
             )
 
             // Important: Notify about window FIRST
+            // Phase 3.7: Use context-specific notifications
+            for (_, extensionContext) in extensionContexts {
+                extensionContext.didOpenWindow(adapter)
+                extensionContext.didFocusWindow(adapter)
+            }
+            // Also notify controller for backward compatibility
             controller.didOpenWindow(adapter)
             controller.didFocusWindow(adapter)
 
@@ -1320,6 +2202,11 @@ final class ExtensionManager: NSObject, ObservableObject,
                     for: tab,
                     browserManager: browserManager
                 )
+                // Phase 3.7: Use context-specific notifications
+                for (_, extensionContext) in extensionContexts {
+                    extensionContext.didOpenTab(tabAdapter)
+                }
+                // Also notify controller for backward compatibility
                 controller.didOpenTab(tabAdapter)
             }
 
@@ -1329,6 +2216,12 @@ final class ExtensionManager: NSObject, ObservableObject,
                     for: currentTab,
                     browserManager: browserManager
                 )
+                // Phase 3.7: Use context-specific notifications
+                for (_, extensionContext) in extensionContexts {
+                    extensionContext.didActivateTab(tabAdapter, previousActiveTab: nil)
+                    extensionContext.didSelectTabs([tabAdapter])
+                }
+                // Also notify controller for backward compatibility
                 controller.didActivateTab(tabAdapter, previousActiveTab: nil)
                 controller.didSelectTabs([tabAdapter])
             }
@@ -1346,6 +2239,7 @@ final class ExtensionManager: NSObject, ObservableObject,
     private func adapter(for tab: Tab, browserManager: BrowserManager)
         -> ExtensionTabAdapter
     {
+        // Phase 13.2: Enhanced adapter caching - reuse adapters across contexts
         if let existing = tabAdapters[tab.id] {
             // Only log cached adapter access every 10 seconds to prevent spam
             let now = Date()
@@ -1357,6 +2251,8 @@ final class ExtensionManager: NSObject, ObservableObject,
             }
             return existing
         }
+        
+        // Phase 13.2: Create new adapter and cache it
         let created = ExtensionTabAdapter(
             tab: tab,
             browserManager: browserManager
@@ -1367,6 +2263,14 @@ final class ExtensionManager: NSObject, ObservableObject,
         )
         return created
     }
+    
+    // Phase 13.2: Invalidate adapter cache when tab is closed
+    @available(macOS 15.5, *)
+    func invalidateAdapter(for tabId: UUID) {
+        tabAdapters.removeValue(forKey: tabId)
+        // Also invalidate tab list cache
+        tabListCache = nil
+    }
 
     // Expose a stable adapter getter for window adapters
     @available(macOS 15.4, *)
@@ -1374,12 +2278,26 @@ final class ExtensionManager: NSObject, ObservableObject,
         guard let bm = browserManagerRef else { return nil }
         return adapter(for: tab, browserManager: bm)
     }
+    
+    /// Phase 6: Get active tab adapter for command execution context
+    @available(macOS 15.4, *)
+    func getActiveTabAdapter() -> ExtensionTabAdapter? {
+        guard let bm = browserManagerRef else { return nil }
+        guard let activeTab = bm.currentTabForActiveWindow() else { return nil }
+        return stableAdapter(for: activeTab)
+    }
 
     @available(macOS 15.4, *)
     func notifyTabOpened(_ tab: Tab) {
         guard let bm = browserManagerRef, let controller = extensionController
         else { return }
         let a = adapter(for: tab, browserManager: bm)
+        
+        // Phase 3.7: Use context-specific notifications
+        for (_, extensionContext) in extensionContexts {
+            extensionContext.didOpenTab(a)
+        }
+        // Also notify controller for backward compatibility
         controller.didOpenTab(a)
     }
 
@@ -1389,6 +2307,14 @@ final class ExtensionManager: NSObject, ObservableObject,
         else { return }
         let newA = adapter(for: newTab, browserManager: bm)
         let oldA = previous.map { adapter(for: $0, browserManager: bm) }
+        
+        // Phase 3.7: Use context-specific notifications
+        for (_, extensionContext) in extensionContexts {
+            extensionContext.didActivateTab(newA, previousActiveTab: oldA)
+            extensionContext.didSelectTabs([newA])
+            if let oldA { extensionContext.didDeselectTabs([oldA]) }
+        }
+        // Also notify controller for backward compatibility
         controller.didActivateTab(newA, previousActiveTab: oldA)
         controller.didSelectTabs([newA])
         if let oldA { controller.didDeselectTabs([oldA]) }
@@ -1399,6 +2325,12 @@ final class ExtensionManager: NSObject, ObservableObject,
         guard let bm = browserManagerRef, let controller = extensionController
         else { return }
         let a = adapter(for: tab, browserManager: bm)
+        
+        // Phase 3.7: Use context-specific notifications
+        for (_, extensionContext) in extensionContexts {
+            extensionContext.didCloseTab(a, windowIsClosing: false)
+        }
+        // Also notify controller for backward compatibility
         controller.didCloseTab(a, windowIsClosing: false)
         tabAdapters[tab.id] = nil
     }
@@ -1411,7 +2343,571 @@ final class ExtensionManager: NSObject, ObservableObject,
         guard let bm = browserManagerRef, let controller = extensionController
         else { return }
         let a = adapter(for: tab, browserManager: bm)
+        
+        // Phase 3.7: Use context-specific notifications
+        for (_, extensionContext) in extensionContexts {
+            extensionContext.didChangeTabProperties(properties, for: a)
+        }
+        // Also notify controller for backward compatibility
         controller.didChangeTabProperties(properties, for: a)
+    }
+    
+    // Phase 3.7: Additional context-specific notification methods
+    
+    @available(macOS 15.4, *)
+    func notifyTabMoved(_ tab: Tab, fromIndex: Int, inWindow windowAdapter: ExtensionWindowAdapter) {
+        guard let bm = browserManagerRef, let controller = extensionController else { return }
+        let a = adapter(for: tab, browserManager: bm)
+        
+        // Phase 4.1: Use controller-level notification for all extensions
+        controller.didMoveTab(a, from: fromIndex, in: windowAdapter)
+        
+        // Also use context-specific notifications (Phase 3.7)
+        for (_, extensionContext) in extensionContexts {
+            extensionContext.didMoveTab(a, from: fromIndex, in: windowAdapter)
+        }
+    }
+    
+    @available(macOS 15.4, *)
+    func notifyTabReplaced(oldTab: Tab, with newTab: Tab) {
+        guard let bm = browserManagerRef, let controller = extensionController else { return }
+        let oldA = adapter(for: oldTab, browserManager: bm)
+        let newA = adapter(for: newTab, browserManager: bm)
+        
+        // Phase 4.2: Use controller-level notification for all extensions
+        controller.didReplaceTab(oldA, with: newA)
+        
+        // Also use context-specific notifications (Phase 3.7)
+        for (_, extensionContext) in extensionContexts {
+            extensionContext.didReplaceTab(oldA, with: newA)
+        }
+        
+        print("🔄 [Phase 4.2] Tab replaced: \(oldTab.name) -> \(newTab.name)")
+    }
+    
+    // MARK: - Phase 9.1: Data Record Management
+    
+    /// Fetch all extension data records
+    /// - Parameters:
+    ///   - ofTypes: Set of data types to fetch. Defaults to all available types.
+    ///   - completionHandler: Completion handler with array of data records or error
+    @available(macOS 15.4, *)
+    func fetchExtensionDataRecords(
+        ofTypes dataTypes: Set<WKWebExtension.DataType>? = nil,
+        completionHandler: @escaping ([WKWebExtension.DataRecord]?, Error?) -> Void
+    ) {
+        guard let controller = extensionController else {
+            completionHandler(nil, NSError(domain: "ExtensionManager", code: 1, userInfo: [NSLocalizedDescriptionKey: "Extension controller not available"]))
+            return
+        }
+        
+        // Use provided types or default to all available types
+        let typesToFetch: Set<WKWebExtension.DataType> = dataTypes ?? [
+            .local, .session, .synchronized
+        ]
+        
+        controller.fetchDataRecords(ofTypes: typesToFetch) { records in
+            print("✅ [Phase 9.1] Fetched \(records.count) extension data records")
+            completionHandler(records, nil)
+        }
+    }
+    
+    /// Remove extension data
+    /// - Parameters:
+    ///   - ofTypes: Set of data types to remove
+    ///   - from: Extension ID, or nil to remove from all extensions
+    ///   - completionHandler: Completion handler with error if any
+    @available(macOS 15.4, *)
+    func removeExtensionData(
+        ofTypes dataTypes: Set<WKWebExtension.DataType>,
+        from extensionId: String?,
+        completionHandler: @escaping (Error?) -> Void
+    ) {
+        guard let controller = extensionController else {
+            completionHandler(NSError(domain: "ExtensionManager", code: 1, userInfo: [NSLocalizedDescriptionKey: "Extension controller not available"]))
+            return
+        }
+        
+        if let extensionId = extensionId {
+            // Fetch data records for the specific extension first
+            controller.fetchDataRecord(ofTypes: dataTypes, for: extensionContexts[extensionId]!) { dataRecord in
+                if let dataRecord = dataRecord {
+                    controller.removeData(ofTypes: dataTypes, from: [dataRecord]) {
+                        print("✅ [Phase 9.1] Removed data from extension: \(extensionId)")
+                        completionHandler(nil)
+                    }
+                } else {
+                    print("⚠️ [Phase 9.1] No data record found for extension: \(extensionId)")
+                    completionHandler(nil)
+                }
+            }
+        } else {
+            // Remove data from all extensions (extensionId is nil) - fetch all records first
+            controller.fetchDataRecords(ofTypes: dataTypes) { dataRecords in
+                controller.removeData(ofTypes: dataTypes, from: dataRecords) {
+                    print("✅ [Phase 9.1] Removed data from all extensions")
+                    completionHandler(nil)
+                }
+            }
+        }
+    }
+    
+    @available(macOS 15.4, *)
+    func notifyWindowClosed(_ windowAdapter: ExtensionWindowAdapter) {
+        // Use context-specific notifications
+        for (_, extensionContext) in extensionContexts {
+            extensionContext.didCloseWindow(windowAdapter)
+        }
+    }
+    
+    // MARK: - Phase 4.4: Extension Context Lookup
+    
+    /// Get extension ID for a specific unique identifier (UUID)
+    @available(macOS 15.4, *)
+    func getExtensionId(for uniqueIdentifier: UUID) -> String? {
+        for (id, context) in extensionContexts {
+            if context.uniqueIdentifier == uniqueIdentifier.uuidString {
+                return id
+            }
+        }
+        return nil
+    }
+    
+    /// Get extension ID for a specific unique identifier (String)
+    /// Attempts to match by UUID string representation or by direct string comparison
+    @available(macOS 15.4, *)
+    func getExtensionId(for uniqueIdentifier: String) -> String? {
+        // First try to convert to UUID and use the UUID overload
+        if let uuid = UUID(uuidString: uniqueIdentifier) {
+            return getExtensionId(for: uuid)
+        }
+        
+        // If not a valid UUID, try string comparison with UUID string representations
+        for (id, context) in extensionContexts {
+            if context.uniqueIdentifier == uniqueIdentifier {
+                return id
+            }
+        }
+        return nil
+    }
+    
+    /// Get extension context for a specific extension ID
+    @available(macOS 15.4, *)
+    func getExtensionContext(for extensionId: String) -> WKWebExtensionContext? {
+        // First check our internal cache
+        if let context = extensionContexts[extensionId] {
+            return context
+        }
+        
+        // Fallback to controller lookup
+        guard let controller = extensionController,
+              let webExtension = extensionContexts[extensionId]?.webExtension else {
+            return nil
+        }
+        
+        return controller.extensionContext(for: webExtension)
+    }
+    
+    /// Get extension context for a specific extension
+    @available(macOS 15.4, *)
+    func getExtensionContext(for webExtension: WKWebExtension) -> WKWebExtensionContext? {
+        guard let controller = extensionController else { return nil }
+        return controller.extensionContext(for: webExtension)
+    }
+    
+    /// Get extension context for a specific URL (if it's an extension URL)
+    @available(macOS 15.4, *)
+    func getExtensionContext(for url: URL) -> WKWebExtensionContext? {
+        guard let controller = extensionController else { return nil }
+        
+        // Check if URL is an extension URL
+        if url.scheme == "chrome-extension" || url.scheme == "moz-extension" || url.scheme == "safari-extension" || url.scheme == "nook" {
+            return controller.extensionContext(for: url)
+        }
+        
+        return nil
+    }
+    
+    /// Get web view configuration for an extension URL
+    @available(macOS 15.4, *)
+    func getWebViewConfiguration(for url: URL) -> WKWebViewConfiguration? {
+        guard let extensionContext = getExtensionContext(for: url) else { return nil }
+        return extensionContext.webViewConfiguration
+    }
+    
+    // MARK: - Phase 11.1: Extension Property Queries
+    
+    /// Get a specific extension property value
+    /// - Parameters:
+    ///   - property: The property name to query
+    ///   - extensionId: The extension ID
+    /// - Returns: The property value, or nil if not found
+    @available(macOS 15.4, *)
+    func getExtensionProperty(_ property: String, for extensionId: String) -> Any? {
+        guard let extensionContext = extensionContexts[extensionId] else {
+            return nil
+        }
+        
+        let webExtension = extensionContext.webExtension
+        
+        switch property {
+        case "hasBackgroundContent":
+            return webExtension.hasBackgroundContent
+        case "hasPersistentBackgroundContent":
+            return webExtension.hasPersistentBackgroundContent
+        case "hasInjectedContent":
+            return webExtension.hasInjectedContent
+        case "hasOptionsPage":
+            return webExtension.hasOptionsPage
+        case "hasOverrideNewTabPage":
+            return webExtension.hasOverrideNewTabPage
+        case "displayName":
+            return webExtension.displayName
+        case "version":
+            return webExtension.version
+        case "description":
+            return webExtension.description
+        case "uniqueIdentifier":
+            return extensionContext.uniqueIdentifier
+        default:
+            return nil
+        }
+    }
+    
+    /// Get all extension properties as a dictionary
+    /// - Parameter extensionId: The extension ID
+    /// - Returns: Dictionary of property names to values
+    @available(macOS 15.4, *)
+    func getAllExtensionProperties(for extensionId: String) -> [String: Any] {
+        guard let extensionContext = extensionContexts[extensionId] else {
+            return [:]
+        }
+        
+        let webExtension = extensionContext.webExtension
+        
+        return [
+            "hasBackgroundContent": webExtension.hasBackgroundContent,
+            "hasPersistentBackgroundContent": webExtension.hasPersistentBackgroundContent,
+            "hasInjectedContent": webExtension.hasInjectedContent,
+            "hasOptionsPage": webExtension.hasOptionsPage,
+            "hasOverrideNewTabPage": webExtension.hasOverrideNewTabPage,
+            "displayName": webExtension.displayName ?? "",
+            "version": webExtension.version ?? "",
+            "description": webExtension.description ?? "",
+            "uniqueIdentifier": extensionContext.uniqueIdentifier
+        ]
+    }
+    
+    /// Check if extension can access a URL
+    /// - Parameters:
+    ///   - url: The URL to check
+    ///   - extensionId: The extension ID
+    /// - Returns: true if extension can access the URL
+    @available(macOS 15.4, *)
+    func canAccessURL(_ url: URL, for extensionId: String) -> Bool {
+        guard let extensionContext = extensionContexts[extensionId] else {
+            return false
+        }
+        
+        // Check if URL matches any granted match patterns
+        let grantedPatterns = extensionContext.grantedPermissionMatchPatterns
+        for (pattern, _) in grantedPatterns {
+            if pattern.matches(url) {
+                return true
+            }
+        }
+        
+        // Check if extension has <all_urls> permission
+        if let allURLsPattern = ExtensionUtils.allURLsMatchPattern,
+           grantedPatterns.keys.contains(allURLsPattern) {
+            return true
+        }
+        
+        return false
+    }
+    
+    /// Get all requested permissions for an extension
+    /// - Parameter extensionId: The extension ID
+    /// - Returns: Set of requested permissions
+    @available(macOS 15.4, *)
+    func getRequestedPermissions(for extensionId: String) -> Set<WKWebExtension.Permission> {
+        guard let extensionContext = extensionContexts[extensionId] else {
+            return []
+        }
+        return extensionContext.webExtension.requestedPermissions
+    }
+    
+    /// Get all optional permissions for an extension
+    /// - Parameter extensionId: The extension ID
+    /// - Returns: Set of optional permissions
+    @available(macOS 15.4, *)
+    func getOptionalPermissions(for extensionId: String) -> Set<WKWebExtension.Permission> {
+        guard let extensionContext = extensionContexts[extensionId] else {
+            return []
+        }
+        return extensionContext.webExtension.optionalPermissions
+    }
+    
+    /// Get currently granted permissions for an extension
+    /// - Parameter extensionId: The extension ID
+    /// - Returns: Set of granted permissions
+    @available(macOS 15.4, *)
+    func getCurrentPermissions(for extensionId: String) -> Set<WKWebExtension.Permission> {
+        guard let extensionContext = extensionContexts[extensionId] else {
+            return []
+        }
+        return Set(extensionContext.grantedPermissions.keys)
+    }
+    
+    /// Get extension display name
+    /// - Parameter extensionId: The extension ID
+    /// - Returns: Display name, or nil if not found
+    @available(macOS 15.4, *)
+    func getExtensionDisplayName(for extensionId: String) -> String? {
+        guard let extensionContext = extensionContexts[extensionId] else {
+            return nil
+        }
+        return extensionContext.webExtension.displayName
+    }
+    
+    /// Get extension version
+    /// - Parameter extensionId: The extension ID
+    /// - Returns: Version string, or nil if not found
+    @available(macOS 15.4, *)
+    func getExtensionVersion(for extensionId: String) -> String? {
+        guard let extensionContext = extensionContexts[extensionId] else {
+            return nil
+        }
+        return extensionContext.webExtension.version
+    }
+    
+    /// Get extension description
+    /// - Parameter extensionId: The extension ID
+    /// - Returns: Description string, or nil if not found
+    @available(macOS 15.4, *)
+    func getExtensionDescription(for extensionId: String) -> String? {
+        guard let extensionContext = extensionContexts[extensionId] else {
+            return nil
+        }
+        return extensionContext.webExtension.description
+    }
+    
+    /// Get extension icons at different sizes with caching
+    /// - Parameters:
+    ///   - extensionId: The extension ID
+    ///   - size: The desired icon size
+    /// - Returns: NSImage if available, nil otherwise
+    @available(macOS 15.4, *)
+    func getExtensionIcons(for extensionId: String, size: NSSize) -> NSImage? {
+        // Phase 12.2: Check cache first
+        if let cachedIcons = iconCache[extensionId],
+           let cachedIcon = cachedIcons[size] {
+            return cachedIcon
+        }
+        
+        guard let extensionContext = extensionContexts[extensionId] else {
+            return nil
+        }
+        
+        // Load icon from extension
+        guard let icon = extensionContext.webExtension.icon(for: size) else {
+            return nil
+        }
+        
+        // Phase 12.2: Cache the icon
+        cacheIcon(icon, for: extensionId, size: size)
+        
+        return icon
+    }
+    
+    // MARK: - Phase 13.2: Performance Optimization Methods
+    
+    /// Batch update permissions for an extension
+    /// - Parameters:
+    ///   - permissions: Set of permissions to update
+    ///   - status: The status to set
+    ///   - extensionId: The extension ID
+    @available(macOS 15.4, *)
+    func batchUpdatePermissions(_ permissions: Set<WKWebExtension.Permission>, status: WKWebExtensionContext.PermissionStatus, for extensionId: String) {
+        guard let extensionContext = extensionContexts[extensionId] else { return }
+        
+        // Phase 13.2: Add to pending updates
+        if pendingPermissionUpdates[extensionId] == nil {
+            pendingPermissionUpdates[extensionId] = []
+        }
+        pendingPermissionUpdates[extensionId]?.formUnion(permissions)
+        
+        // Phase 13.2: Schedule batch update if not already scheduled
+        if permissionUpdateTimer == nil {
+            permissionUpdateTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: false) { [weak self] _ in
+                self?.processPendingPermissionUpdates()
+            }
+        }
+    }
+    
+    /// Process pending permission updates in batch
+    @available(macOS 15.4, *)
+    private func processPendingPermissionUpdates() {
+        permissionUpdateTimer?.invalidate()
+        permissionUpdateTimer = nil
+        
+        for (extensionId, permissions) in pendingPermissionUpdates {
+            guard let extensionContext = extensionContexts[extensionId] else { continue }
+            
+            // Apply all pending updates
+            for permission in permissions {
+                // Get the status from cache or use default
+                let status = permissionStatusCache[extensionId]?[String(describing: permission)]?.status ?? .deniedExplicitly
+                extensionContext.setPermissionStatus(status, for: permission)
+            }
+            
+            // Invalidate permission cache
+            permissionStatusCache[extensionId] = nil
+        }
+        
+        pendingPermissionUpdates.removeAll()
+    }
+    
+    /// Get cached property value or fetch and cache it
+    /// - Parameters:
+    ///   - property: Property name
+    ///   - extensionId: Extension ID
+    /// - Returns: Property value or nil
+    @available(macOS 15.4, *)
+    func getCachedProperty(_ property: String, for extensionId: String) -> Any? {
+        let now = Date()
+        
+        // Check cache
+        if let cache = propertyCache[extensionId],
+           now.timeIntervalSince(cache.timestamp) < propertyCacheTTL,
+           let value = cache.properties[property] {
+            return value
+        }
+        
+        // Fetch and cache
+        let value = getExtensionProperty(property, for: extensionId)
+        if var cache = propertyCache[extensionId] {
+            cache.properties[property] = value
+            cache.timestamp = now
+            propertyCache[extensionId] = cache
+        } else {
+            propertyCache[extensionId] = (properties: [property: value as Any], timestamp: now)
+        }
+        
+        return value
+    }
+    
+    /// Invalidate property cache for an extension
+    /// - Parameter extensionId: Extension ID
+    @available(macOS 15.4, *)
+    func invalidatePropertyCache(for extensionId: String) {
+        propertyCache.removeValue(forKey: extensionId)
+    }
+    
+    /// Invalidate all caches (call when extensions are loaded/unloaded)
+    @available(macOS 15.4, *)
+    func invalidateAllCaches() {
+        propertyCache.removeAll()
+        tabListCache = nil
+        windowListCache = nil
+        permissionStatusCache.removeAll()
+    }
+    
+    /// Get cached icon for an extension
+    /// - Parameters:
+    ///   - extensionId: The extension ID
+    ///   - size: The desired icon size
+    /// - Returns: Cached NSImage if available, nil otherwise
+    @available(macOS 15.4, *)
+    func getCachedIcon(for extensionId: String, size: NSSize) -> NSImage? {
+        return iconCache[extensionId]?[size]
+    }
+    
+    /// Cache an icon for an extension
+    /// - Parameters:
+    ///   - icon: The icon to cache
+    ///   - extensionId: The extension ID
+    ///   - size: The icon size
+    @available(macOS 15.4, *)
+    func cacheIcon(_ icon: NSImage, for extensionId: String, size: NSSize) {
+        if iconCache[extensionId] == nil {
+            iconCache[extensionId] = [:]
+        }
+        iconCache[extensionId]?[size] = icon
+    }
+    
+    /// Clear icon cache for an extension
+    /// - Parameter extensionId: The extension ID
+    @available(macOS 15.4, *)
+    func clearIconCache(for extensionId: String) {
+        iconCache.removeValue(forKey: extensionId)
+    }
+    
+    /// Check if extension is inspectable
+    /// - Parameter extensionId: The extension ID
+    /// - Returns: true if inspectable, false otherwise
+    @available(macOS 15.4, *)
+    func isExtensionInspectable(_ extensionId: String) -> Bool {
+        guard let extensionContext = extensionContexts[extensionId] else {
+            return false
+        }
+        return extensionContext.isInspectable
+    }
+    
+    /// Set extension inspectable state
+    /// - Parameters:
+    ///   - inspectable: Whether the extension should be inspectable
+    ///   - extensionId: The extension ID
+    @available(macOS 15.4, *)
+    func setExtensionInspectable(_ inspectable: Bool, for extensionId: String) {
+        setInspectable(inspectable, for: extensionId)
+    }
+    
+    /// Get extension manifest data
+    /// - Parameter extensionId: The extension ID
+    /// - Returns: Manifest dictionary, or nil if not found
+    @available(macOS 15.4, *)
+    func getExtensionManifest(for extensionId: String) -> [String: Any]? {
+        guard let extensionContext = extensionContexts[extensionId] else {
+            return nil
+        }
+        
+        // WKWebExtension doesn't directly expose manifest, but we can reconstruct key info
+        let webExtension = extensionContext.webExtension
+        var manifest: [String: Any] = [:]
+        
+        if let displayName = webExtension.displayName {
+            manifest["name"] = displayName
+        }
+        if let version = webExtension.version {
+            manifest["version"] = version
+        }
+        manifest["description"] = webExtension.description
+        
+        manifest["hasBackgroundContent"] = webExtension.hasBackgroundContent
+        manifest["hasPersistentBackgroundContent"] = webExtension.hasPersistentBackgroundContent
+        manifest["hasInjectedContent"] = webExtension.hasInjectedContent
+        manifest["hasOptionsPage"] = webExtension.hasOptionsPage
+        manifest["hasOverrideNewTabPage"] = webExtension.hasOverrideNewTabPage
+        
+        return manifest
+    }
+    
+    /// Get extension installation state
+    /// - Parameter extensionId: The extension ID
+    /// - Returns: Installation state string, or nil if not found
+    @available(macOS 15.4, *)
+    func getExtensionInstallationState(for extensionId: String) -> String? {
+        guard let extensionContext = extensionContexts[extensionId] else {
+            return "not_installed"
+        }
+        
+        // Check if extension is loaded
+        if extensionContexts[extensionId] != nil {
+            return "installed"
+        }
+        
+        return "unknown"
     }
 
     /// Register a UI anchor view for an extension action button to position popovers.
@@ -1461,6 +2957,32 @@ final class ExtensionManager: NSObject, ObservableObject,
         )
         extensionContext.setPermissionStatus(.grantedExplicitly, for: .tabs)
 
+        // Find the extension ID for this context to track popup lifecycle
+        guard let extensionId = extensionContexts.first(where: { $0.value === extensionContext })?.key else {
+            print("❌ DELEGATE: Could not find extension ID for popup context")
+            completionHandler(
+                NSError(
+                    domain: "ExtensionManager",
+                    code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "Could not find extension ID"]
+                )
+            )
+            return
+        }
+
+        // Close any existing popup for this extension
+        if let existingPopover = activePopovers[extensionId] {
+            print("🔄 Closing existing popup for extension: \(extensionId)")
+            existingPopover.close()
+            activePopovers.removeValue(forKey: extensionId)
+        }
+
+        // Clean up any existing popup WebView for this extension
+        if let existingWebView = popupWebViews[extensionId] {
+            existingWebView.configuration.webExtensionController = nil
+            popupWebViews.removeValue(forKey: extensionId)
+        }
+
         // No additional diagnostics
 
         // No extension-specific diagnostics
@@ -1492,6 +3014,9 @@ final class ExtensionManager: NSObject, ObservableObject,
                 webView.configuration.webExtensionController = controller
                 print("   Attached extension controller to popup WebView")
             }
+
+            // Track the popup WebView for lifecycle management
+            popupWebViews[extensionId] = webView
 
             // Enable inspection for debugging
             webView.isInspectable = true
@@ -1717,6 +3242,21 @@ final class ExtensionManager: NSObject, ObservableObject,
                     let view = match.view
                 {
                     print("   Using registered anchor in current window")
+
+                    // Track the popover for lifecycle management
+                    self.activePopovers[extensionId] = popover
+                    
+                    // Phase 5.3: Set up popover delegate to call action.closePopup() when closed
+                    if #available(macOS 15.5, *) {
+                        let delegate = ExtensionActionPopoverDelegate(
+                            action: action,
+                            extensionId: extensionId,
+                            extensionManager: self
+                        )
+                        popover.delegate = delegate
+                        self.popoverDelegates[extensionId] = delegate
+                    }
+
                     popover.show(
                         relativeTo: view.bounds,
                         of: view,
@@ -1729,6 +3269,21 @@ final class ExtensionManager: NSObject, ObservableObject,
                 // Use first available anchor
                 if let view = anchors.first?.view {
                     print("   Using first available anchor")
+
+                    // Track the popover for lifecycle management
+                    self.activePopovers[extensionId] = popover
+                    
+                    // Phase 5.3: Set up popover delegate to call action.closePopup() when closed
+                    if #available(macOS 15.5, *) {
+                        let delegate = ExtensionActionPopoverDelegate(
+                            action: action,
+                            extensionId: extensionId,
+                            extensionManager: self
+                        )
+                        popover.delegate = delegate
+                        self.popoverDelegates[extensionId] = delegate
+                    }
+
                     popover.show(
                         relativeTo: view.bounds,
                         of: view,
@@ -1748,6 +3303,21 @@ final class ExtensionManager: NSObject, ObservableObject,
                     height: 20
                 )
                 print("   Using fallback anchor in center of window")
+
+                // Track the popover for lifecycle management
+                self.activePopovers[extensionId] = popover
+                
+                // Phase 5.3: Set up popover delegate to call action.closePopup() when closed
+                if #available(macOS 15.5, *) {
+                    let delegate = ExtensionActionPopoverDelegate(
+                        action: action,
+                        extensionId: extensionId,
+                        extensionManager: self
+                    )
+                    popover.delegate = delegate
+                    self.popoverDelegates[extensionId] = delegate
+                }
+
                 popover.show(
                     relativeTo: rect,
                     of: contentView,
@@ -1766,6 +3336,192 @@ final class ExtensionManager: NSObject, ObservableObject,
                 )
             )
         }
+    }
+
+    // MARK: - Popup Lifecycle Management (Phase 5.3)
+
+    /// Close the popup for a specific extension (called by action.closePopup())
+    func closeExtensionPopup(for extensionId: String) {
+        print("🔐 [Phase 5.3] Closing popup for extension: \(extensionId)")
+
+        // Phase 5.3: Call action.closePopup() if we have the action
+        if #available(macOS 15.5, *), let action = extensionActions[extensionId] {
+            action.closePopup()
+            print("   Called action.closePopup()")
+        }
+
+        // Close and remove popover
+        if let popover = activePopovers[extensionId] {
+            // Remove delegate before closing to avoid double-cleanup
+            popover.delegate = nil
+            popover.close()
+            activePopovers.removeValue(forKey: extensionId)
+            print("   Closed active popover")
+        }
+        
+        // Clean up popover delegate
+        popoverDelegates.removeValue(forKey: extensionId)
+
+        // Clean up popup WebView
+        if let webView = popupWebViews[extensionId] {
+            webView.configuration.webExtensionController = nil
+            popupWebViews.removeValue(forKey: extensionId)
+            print("   Cleaned up popup WebView")
+        }
+    }
+
+    /// Close all active extension popups (called during extension unload, etc.)
+    func closeAllExtensionPopups() {
+        print("🔐 [Phase 5.3] Closing all extension popups")
+
+        // Phase 5.3: Call action.closePopup() for all active actions
+        if #available(macOS 15.5, *) {
+            for (extensionId, action) in extensionActions {
+                if activePopovers[extensionId] != nil {
+                    action.closePopup()
+                    print("   Called action.closePopup() for extension: \(extensionId)")
+                }
+            }
+        }
+
+        // Close all popovers
+        for (extensionId, popover) in activePopovers {
+            popover.delegate = nil
+            popover.close()
+            print("   Closed popover for extension: \(extensionId)")
+        }
+        activePopovers.removeAll()
+        popoverDelegates.removeAll()
+
+        // Clean up all popup WebViews
+        for (extensionId, webView) in popupWebViews {
+            webView.configuration.webExtensionController = nil
+            print("   Cleaned up WebView for extension: \(extensionId)")
+        }
+        popupWebViews.removeAll()
+    }
+
+    /// Check if an extension currently has an active popup
+    func hasActivePopup(for extensionId: String) -> Bool {
+        return activePopovers[extensionId] != nil
+    }
+
+    // MARK: - Action Update Delegate (Phase 2.1)
+    /// Called when an action's properties are updated (icon, label, badgeText, enabled state, menuItems)
+    @available(macOS 15.5, *)
+    func webExtensionController(
+        _ controller: WKWebExtensionController,
+        didUpdate action: WKWebExtension.Action,
+        forExtensionContext extensionContext: WKWebExtensionContext
+    ) {
+        // Find the extension ID for this context
+        guard let extensionId = extensionContexts.first(where: { $0.value === extensionContext })?.key else {
+            print("⚠️ [Action Update] Could not find extension ID for context")
+            return
+        }
+
+        // Store the action reference for this extension
+        extensionActions[extensionId] = action
+
+        print("🔄 [Action Update] Extension: \(extensionId)")
+        print("   Label: \(action.label)")
+        print("   Badge Text: \(action.badgeText)")
+        print("   Enabled: \(action.isEnabled)")
+        print("   Has Unread Badge: \(action.hasUnreadBadgeText)")
+        print("   Menu Items Count: \(action.menuItems.count)")
+
+        // Post notification so UI can update
+        NotificationCenter.default.post(
+            name: NSNotification.Name("ExtensionActionDidUpdate"),
+            object: nil,
+            userInfo: [
+                "extensionId": extensionId,
+                "action": action
+            ]
+        )
+    }
+
+    // MARK: - Native Messaging Delegate (Phase 2.2)
+    /// Called when an extension wants to send a one-time message to native application code
+    @available(macOS 15.5, *)
+    func webExtensionController(
+        _ controller: WKWebExtensionController,
+        sendMessage message: Any,
+        toApplicationWithIdentifier applicationIdentifier: String?,
+        for extensionContext: WKWebExtensionContext,
+        replyHandler: @escaping (Any?, Error?) -> Void
+    ) {
+        print("📨 [NativeMessaging] Received message from extension")
+        print("   Extension: \(extensionContext.webExtension.displayName ?? "Unknown")")
+        print("   Application Identifier: \(applicationIdentifier ?? "nil")")
+        print("   Message: \(message)")
+        
+        // Validate message is JSON-serializable
+        guard JSONSerialization.isValidJSONObject(message) else {
+            print("❌ [NativeMessaging] Message is not JSON-serializable")
+            replyHandler(
+                nil,
+                NSError(
+                    domain: "NativeMessaging",
+                    code: 1,
+                    userInfo: [
+                        NSLocalizedDescriptionKey: "Message must be JSON-serializable"
+                    ]
+                )
+            )
+            return
+        }
+        
+        // Process message asynchronously
+        Task { @MainActor in
+            do {
+                let reply = try await NativeMessagingManager.shared.processMessage(
+                    message,
+                    applicationIdentifier: applicationIdentifier,
+                    extensionContext: extensionContext
+                )
+                print("✅ [NativeMessaging] Message processed successfully")
+                replyHandler(reply, nil)
+            } catch {
+                print("❌ [NativeMessaging] Error processing message: \(error.localizedDescription)")
+                replyHandler(nil, error)
+            }
+        }
+    }
+
+    // MARK: - Native Messaging Port Delegate (Phase 2.3)
+    /// Called when an extension wants to establish a persistent connection to native application code
+    @available(macOS 15.5, *)
+    func webExtensionController(
+        _ controller: WKWebExtensionController,
+        connectUsing port: WKWebExtension.MessagePort,
+        for extensionContext: WKWebExtensionContext,
+        completionHandler: @escaping (Error?) -> Void
+    ) {
+        let extensionName = extensionContext.webExtension.displayName ?? "Unknown"
+        let applicationIdentifier = port.applicationIdentifier
+        print("🔌 [NativeMessaging] Extension '\(extensionName)' requesting port connection")
+        print("   Application Identifier: \(applicationIdentifier ?? "nil")")
+        
+        // Create connection via NativeMessagingManager
+        let connection = NativeMessagingManager.shared.createConnection(
+            port: port,
+            extensionContext: extensionContext,
+            applicationIdentifier: applicationIdentifier
+        )
+        
+        // Notify handler that connection was established
+        if let handler = NativeMessagingManager.shared.getPortHandler(for: applicationIdentifier) {
+            handler.portDidConnect(
+                connection,
+                applicationIdentifier: applicationIdentifier,
+                extensionContext: extensionContext
+            )
+        }
+        
+        // Connection is ready
+        print("✅ [NativeMessaging] Port connection established")
+        completionHandler(nil)
     }
 
     // MARK: - WKScriptMessageHandler (popup bridge)
@@ -1973,8 +3729,14 @@ final class ExtensionManager: NSObject, ObservableObject,
         _ controller: WKWebExtensionController,
         openWindowsFor extensionContext: WKWebExtensionContext
     ) -> [any WKWebExtensionWindow] {
-        // Throttle logging to prevent spam
+        // Phase 13.2: Use cached window list if available and fresh
         let now = Date()
+        if let cache = windowListCache,
+           now.timeIntervalSince(cache.timestamp) < listCacheTTL {
+            return cache.windows
+        }
+        
+        // Throttle logging to prevent spam
         if now.timeIntervalSince(lastOpenWindowsCall) > 10.0 {
             print("[ExtensionManager] 🎯 openWindowsFor() called")
             lastOpenWindowsCall = now
@@ -1986,10 +3748,32 @@ final class ExtensionManager: NSObject, ObservableObject,
         if windowAdapter == nil {
             windowAdapter = ExtensionWindowAdapter(browserManager: bm)
         }
-        return windowAdapter != nil ? [windowAdapter!] : []
+        
+        let windows = windowAdapter != nil ? [windowAdapter!] : []
+        
+        // Phase 13.2: Cache the result
+        if let adapter = windowAdapter {
+            windowListCache = (windows: [adapter], timestamp: now)
+        }
+        
+        return windows
     }
 
     // MARK: - Permission prompting helper (invoked by delegate when needed)
+    
+    /// Helper to get extension ID from extension context
+    @available(macOS 15.4, *)
+    private func getExtensionId(from extensionContext: WKWebExtensionContext) -> String? {
+        let uniqueId = extensionContext.uniqueIdentifier
+        // Find the extension ID by matching uniqueIdentifier
+        for (extensionId, context) in extensionContexts {
+            if context.uniqueIdentifier == uniqueId {
+                return extensionId
+            }
+        }
+        return nil
+    }
+    
     @available(macOS 15.4, *)
     func presentPermissionPrompt(
         requestedPermissions: Set<WKWebExtension.Permission>,
@@ -1997,13 +3781,14 @@ final class ExtensionManager: NSObject, ObservableObject,
         requestedMatches: Set<WKWebExtension.MatchPattern>,
         optionalMatches: Set<WKWebExtension.MatchPattern>,
         extensionDisplayName: String,
+        extensionId: String? = nil, // Phase 12.2: Optional extension ID for icon loading
         onDecision:
             @escaping (
                 _ grantedPermissions: Set<WKWebExtension.Permission>,
                 _ grantedMatches: Set<WKWebExtension.MatchPattern>
             ) -> Void,
         onCancel: @escaping () -> Void,
-        extensionLogo: NSImage
+        extensionLogo: NSImage? = nil // Phase 12.2: Make optional, will load dynamically if nil
     ) {
         guard let bm = browserManagerRef else {
             onCancel()
@@ -2026,6 +3811,7 @@ final class ExtensionManager: NSObject, ObservableObject,
                 content: {
                     ExtensionPermissionView(
                         extensionName: extensionDisplayName,
+                        extensionId: extensionId, // Phase 12.2: Pass extension ID
                         requestedPermissions: reqPerms,
                         optionalPermissions: optPerms,
                         requestedHostPermissions: reqHosts,
@@ -2044,7 +3830,7 @@ final class ExtensionManager: NSObject, ObservableObject,
                             bm.closeDialog()
                             onCancel()
                         },
-                        extensionLogo: extensionLogo
+                        extensionLogo: extensionLogo // Phase 12.2: Pass optional logo
                     )
                 },
                 footer: { EmptyView() }
@@ -2073,6 +3859,7 @@ final class ExtensionManager: NSObject, ObservableObject,
             optionalMatches: extensionContext.webExtension
                 .optionalPermissionMatchPatterns,
             extensionDisplayName: displayName,
+            extensionId: getExtensionId(from: extensionContext), // Phase 12.2: Get extension ID
             onDecision: { grantedPerms, grantedMatches in
                 for p in permissions.union(
                     extensionContext.webExtension.optionalPermissions
@@ -2116,7 +3903,7 @@ final class ExtensionManager: NSObject, ObservableObject,
             },
             extensionLogo: extensionContext.webExtension.icon(
                 for: .init(width: 64, height: 64)
-            ) ?? NSImage()
+            ) // Phase 12.2: Pass nil to allow dynamic loading
         )
     }
 
@@ -2134,10 +3921,26 @@ final class ExtensionManager: NSObject, ObservableObject,
         completionHandler:
             @escaping ((any WKWebExtensionTab)?, (any Error)?) -> Void
     ) {
-        print("🆕 [DELEGATE] openNewTabUsing called!")
+        print("🆕 [Phase 8.1] openNewTabUsing called!")
         print("   URL: \(configuration.url?.absoluteString ?? "nil")")
         print("   Should be active: \(configuration.shouldBeActive)")
         print("   Should be pinned: \(configuration.shouldBePinned)")
+        print("   Index: \(configuration.index)")
+        print("   Parent tab: \(configuration.parentTab != nil ? "yes" : "no")")
+        print("   Should add to selection: \(configuration.shouldAddToSelection)")
+        print("   Should be muted: \(configuration.shouldBeMuted)")
+        print("   Should reader mode be active: \(configuration.shouldReaderModeBeActive)")
+        
+        // Phase 11.1: Log extension properties for debugging
+        if #available(macOS 15.4, *) {
+            let extensionId = extensionContext.uniqueIdentifier
+            if let displayName = getExtensionDisplayName(for: extensionId) {
+                print("   [Phase 11.1] Extension: \(displayName)")
+            }
+            if let version = getExtensionVersion(for: extensionId) {
+                print("   [Phase 11.1] Version: \(version)")
+            }
+        }
 
         guard let bm = browserManagerRef else {
             print("❌ Browser manager reference is nil")
@@ -2155,6 +3958,15 @@ final class ExtensionManager: NSObject, ObservableObject,
             return
         }
 
+        // Phase 8.1: Determine target space based on window configuration
+        let targetSpace: Space?
+        if let window = configuration.window as? ExtensionWindowAdapter {
+            // Use the window's current space (for now, use current space as window adapter doesn't expose space)
+            targetSpace = bm.tabManager.currentSpace
+        } else {
+            targetSpace = bm.tabManager.currentSpace
+        }
+
         // Special handling for extension page URLs (options, popup, etc.): use the extension's configuration
         if let url = configuration.url,
             url.scheme?.lowercased() == "safari-web-extension"
@@ -2163,54 +3975,100 @@ final class ExtensionManager: NSObject, ObservableObject,
             let resolvedContext = controller.extensionContext(for: url)
         {
             print(
-                "🎛️ [DELEGATE] Opening extension page in tab with extension configuration: \(url.absoluteString)"
+                "🎛️ [Phase 8.1] Opening extension page in tab with extension configuration: \(url.absoluteString)"
             )
-            let space = bm.tabManager.currentSpace
             let newTab = bm.tabManager.createNewTab(
                 url: url.absoluteString,
-                in: space
+                in: targetSpace
             )
             let cfg =
                 resolvedContext.webViewConfiguration
                 ?? BrowserConfiguration.shared.webViewConfiguration
             newTab.applyWebViewConfigurationOverride(cfg)
-            if configuration.shouldBePinned { bm.tabManager.pinTab(newTab) }
-            if configuration.shouldBeActive {
-                bm.tabManager.setActiveTab(newTab)
-            }
+            
+            // Phase 8.1: Apply all configuration parameters
+            applyTabConfiguration(configuration, to: newTab, in: bm)
+            
             let tabAdapter = self.stableAdapter(for: newTab)
             completionHandler(tabAdapter, nil)
             return
         }
 
         let targetURL = configuration.url
+        let newTab: Tab
+        
         if let url = targetURL {
-            let space = bm.tabManager.currentSpace
-            let newTab = bm.tabManager.createNewTab(
+            newTab = bm.tabManager.createNewTab(
                 url: url.absoluteString,
-                in: space
+                in: targetSpace
             )
-            if configuration.shouldBePinned { bm.tabManager.pinTab(newTab) }
-            if configuration.shouldBeActive {
-                bm.tabManager.setActiveTab(newTab)
-            }
-            print("✅ Created new tab: \(newTab.name)")
-
-            // Return the created tab adapter to the extension
-            let tabAdapter = self.stableAdapter(for: newTab)
-            completionHandler(tabAdapter, nil)
-            return
+        } else {
+            // No URL specified — create a blank tab
+            print("⚠️ [Phase 8.1] No URL specified, creating blank tab")
+            newTab = bm.tabManager.createNewTab(in: targetSpace)
         }
-        // No URL specified — create a blank tab
-        print("⚠️ No URL specified, creating blank tab")
-        let space = bm.tabManager.currentSpace
-        let newTab = bm.tabManager.createNewTab(in: space)
-        if configuration.shouldBeActive { bm.tabManager.setActiveTab(newTab) }
-        print("✅ Created blank tab: \(newTab.name)")
+        
+        // Phase 8.1: Apply all configuration parameters
+        applyTabConfiguration(configuration, to: newTab, in: bm)
+        
+        print("✅ [Phase 8.1] Created new tab: \(newTab.name)")
 
         // Return the created tab adapter to the extension
         let tabAdapter = self.stableAdapter(for: newTab)
         completionHandler(tabAdapter, nil)
+    }
+    
+    /// Phase 8.1: Apply TabConfiguration parameters to a newly created tab
+    @available(macOS 15.4, *)
+    private func applyTabConfiguration(
+        _ configuration: WKWebExtension.TabConfiguration,
+        to tab: Tab,
+        in browserManager: BrowserManager
+    ) {
+        // Phase 8.1: Handle parent tab relationship (Phase 1.1)
+        if let parentTab = configuration.parentTab as? ExtensionTabAdapter {
+            tab.parentTabId = parentTab.tab.id
+            print("   [Phase 8.1] Set parent tab: \(parentTab.tab.id)")
+        }
+        
+        // Phase 8.1: Handle index positioning
+        if let spaceId = tab.spaceId, let arr = browserManager.tabManager.tabsBySpace[spaceId] {
+            let targetIndex = min(max(configuration.index, 0), arr.count)
+            if let currentIndex = arr.firstIndex(where: { $0.id == tab.id }), currentIndex != targetIndex {
+                browserManager.tabManager.reorderRegularTabs(tab, in: spaceId, to: targetIndex)
+                print("   [Phase 8.1] Positioned tab at index: \(targetIndex)")
+            }
+        }
+        
+        // Phase 8.1: Handle pinning
+        if configuration.shouldBePinned {
+            browserManager.tabManager.pinTab(tab)
+            print("   [Phase 8.1] Pinned tab")
+        }
+        
+        // Phase 8.1: Handle muting (Phase 1.3)
+        if configuration.shouldBeMuted {
+            tab.isAudioMuted = true
+            print("   [Phase 8.1] Muted tab")
+        }
+        
+        // Phase 8.1: Handle reader mode (Phase 1.4)
+        if configuration.shouldReaderModeBeActive {
+            tab.isReaderModeActive = true
+            print("   [Phase 8.1] Activated reader mode")
+        }
+        
+        // Phase 8.1: Handle selection (Phase 1.7)
+        if configuration.shouldAddToSelection {
+            browserManager.tabManager.setTabSelected(tab, selected: true)
+            print("   [Phase 8.1] Added tab to selection")
+        }
+        
+        // Phase 8.1: Handle active state (must be last to ensure other properties are set first)
+        if configuration.shouldBeActive {
+            browserManager.tabManager.setActiveTab(tab)
+            print("   [Phase 8.1] Activated tab")
+        }
     }
 
     @available(macOS 15.5, *)
@@ -2607,6 +4465,7 @@ final class ExtensionManager: NSObject, ObservableObject,
             requestedMatches: matchPatterns,
             optionalMatches: [],
             extensionDisplayName: displayName,
+            extensionId: getExtensionId(from: extensionContext), // Phase 12.2: Get extension ID
             onDecision: { _, grantedMatches in
                 for m in matchPatterns {
                     extensionContext.setPermissionStatus(
@@ -2628,7 +4487,7 @@ final class ExtensionManager: NSObject, ObservableObject,
             },
             extensionLogo: extensionContext.webExtension.icon(
                 for: .init(width: 64, height: 64)
-            ) ?? NSImage()
+            ) // Phase 12.2: Pass nil to allow dynamic loading
         )
     }
 

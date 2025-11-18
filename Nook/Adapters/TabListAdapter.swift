@@ -106,6 +106,17 @@ class SpaceRegularTabListAdapter: TabListDataSource, ObservableObject {
         menu.addItem(unloadAllItem)
 
         menu.addItem(NSMenuItem.separator())
+        
+        // Phase 3.3: Add extension context menu items
+        if #available(macOS 15.4, *) {
+            let extensionItems = ExtensionManager.shared.getContextMenuItems(for: tab)
+            if !extensionItems.isEmpty {
+                menu.addItem(NSMenuItem.separator())
+                menu.items.append(contentsOf: extensionItems)
+            }
+        }
+
+        menu.addItem(NSMenuItem.separator())
 
         // Close
         let closeItem = NSMenuItem(title: "Close tab", action: #selector(closeTab(_:)), keyEquivalent: "")
@@ -242,6 +253,17 @@ class SpacePinnedTabListAdapter: TabListDataSource, ObservableObject {
         unloadAllItem.target = self
         unloadAllItem.representedObject = tab
         menu.addItem(unloadAllItem)
+
+        menu.addItem(NSMenuItem.separator())
+        
+        // Phase 3.3: Add extension context menu items
+        if #available(macOS 15.4, *) {
+            let extensionItems = ExtensionManager.shared.getContextMenuItems(for: tab)
+            if !extensionItems.isEmpty {
+                menu.addItem(NSMenuItem.separator())
+                menu.items.append(contentsOf: extensionItems)
+            }
+        }
 
         menu.addItem(NSMenuItem.separator())
 

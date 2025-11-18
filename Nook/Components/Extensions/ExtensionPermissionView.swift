@@ -11,13 +11,17 @@ import WebKit
 @available(macOS 15.4, *)
 struct ExtensionPermissionView: View {
     let extensionName: String
+    let extensionId: String?
     let requestedPermissions: [String]
     let optionalPermissions: [String]
     let requestedHostPermissions: [String]
     let optionalHostPermissions: [String]
     let onGrant: () -> Void
     let onDeny: () -> Void
-    let extensionLogo: NSImage
+    let extensionLogo: NSImage? // Phase 12.2: Make optional, will load dynamically if nil
+    
+    @State private var loadedIcon: NSImage?
+    @State private var isLoadingIcon: Bool = false
 
     
     var body: some View {
@@ -31,10 +35,25 @@ struct ExtensionPermissionView: View {
                     Image(systemName: "arrow.left")
                         .font(.system(size: 28, weight: .medium))
                         .foregroundColor(.secondary)
-                    Image(nsImage: extensionLogo)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 64, height: 64)
+                    
+                    // Phase 12.2: Load icon dynamically
+                    Group {
+                        if let icon = loadedIcon ?? extensionLogo {
+                            Image(nsImage: icon)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 64, height: 64)
+                        } else if isLoadingIcon {
+                            ProgressView()
+                                .frame(width: 64, height: 64)
+                        } else {
+                            Image(systemName: "puzzlepiece.extension")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 64, height: 64)
+                                .foregroundColor(.secondary)
+                        }
+                    }
                 }
 
                 
@@ -65,6 +84,40 @@ struct ExtensionPermissionView: View {
             }
         }
         .padding(20)
+        .onAppear {
+            // Phase 12.2: Load extension icon if not provided and extensionId is available
+            if extensionLogo == nil, let extensionId = extensionId {
+                loadExtensionIcon(extensionId: extensionId)
+            } else {
+                loadedIcon = extensionLogo
+            }
+        }
+    }
+    
+    // Phase 12.2: Load extension icon dynamically
+    private func loadExtensionIcon(extensionId: String) {
+        guard #available(macOS 15.4, *) else { return }
+        
+        isLoadingIcon = true
+        
+        let iconSize = NSSize(width: 64, height: 64)
+        
+        // Try to get from cache first
+        if let cachedIcon = ExtensionManager.shared.getCachedIcon(for: extensionId, size: iconSize) {
+            loadedIcon = cachedIcon
+            isLoadingIcon = false
+            return
+        }
+        
+        // Try to load from extension context
+        if let extensionIcon = ExtensionManager.shared.getExtensionIcons(for: extensionId, size: iconSize) {
+            loadedIcon = extensionIcon
+            isLoadingIcon = false
+            return
+        }
+        
+        // If no icon found, use placeholder
+        isLoadingIcon = false
     }
     
     private func getPermissionDescription(_ permission: String) -> String {
@@ -96,6 +149,7 @@ struct ExtensionPermissionView: View {
 #Preview {
     ExtensionPermissionView(
         extensionName: "Sample Extension",
+        extensionId: nil,
         requestedPermissions: ["storage", "activeTab", "tabs"],
         optionalPermissions: ["notifications"],
         requestedHostPermissions: ["https://*.google.com/*"],

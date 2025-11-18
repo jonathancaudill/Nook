@@ -470,6 +470,9 @@ class TabManager: ObservableObject {
 
     // Currently active tab
     private(set) var currentTab: Tab?
+    
+    // Multi-selection support (Phase 1.7)
+    @Published var selectedTabs: Set<UUID> = []
 
     init(browserManager: BrowserManager? = nil, context: ModelContext) {
         self.browserManager = browserManager
@@ -1074,6 +1077,15 @@ class TabManager: ObservableObject {
         print("🔄 Setting currentTab from \(previous?.name ?? "nil") to \(tab.name)")
         currentTab = tab
         print("✅ currentTab set successfully to: \(currentTab?.name ?? "nil")")
+        
+        // Add to selected tabs (Phase 1.7)
+        selectedTabs.insert(tab.id)
+        
+        // Phase 3.4: Record user gesture when tab is activated
+        if #available(macOS 15.4, *) {
+            ExtensionManager.shared.userGesturePerformed(in: tab)
+        }
+        
         // Do not auto-exit split when leaving split panes; preserve split state
 
         // Update active side in split view for all windows that contain this tab
@@ -1523,6 +1535,14 @@ class TabManager: ObservableObject {
         withCurrentProfilePinnedArray { arr in
             guard let currentIndex = arr.firstIndex(where: { $0.id == tab.id }) else { return }
             guard index != currentIndex else { return }
+            
+            // Phase 4.1: Notify extension controller about tab movement
+            if #available(macOS 15.4, *) {
+                if let windowAdapter = ExtensionManager.shared.windowAdapter {
+                    ExtensionManager.shared.notifyTabMoved(tab, fromIndex: currentIndex, inWindow: windowAdapter)
+                }
+            }
+            
             if currentIndex < arr.count { arr.remove(at: currentIndex) }
             let safeIndex = max(0, min(index, arr.count))
             arr.insert(tab, at: safeIndex)
@@ -1534,6 +1554,13 @@ class TabManager: ObservableObject {
         guard var spacePinned = spacePinnedTabs[spaceId],
               let currentIndex = spacePinned.firstIndex(where: { $0.id == tab.id }) else { return }
         guard index != currentIndex else { return }
+        
+        // Phase 4.1: Notify extension controller about tab movement
+        if #available(macOS 15.4, *) {
+            if let windowAdapter = ExtensionManager.shared.windowAdapter {
+                ExtensionManager.shared.notifyTabMoved(tab, fromIndex: currentIndex, inWindow: windowAdapter)
+            }
+        }
         
         if currentIndex < spacePinned.count { spacePinned.remove(at: currentIndex) }
         let clampedIndex = min(max(index, 0), spacePinned.count)
@@ -1548,10 +1575,17 @@ class TabManager: ObservableObject {
         persistSnapshot()
     }
     
-    private func reorderRegularTabs(_ tab: Tab, in spaceId: UUID, to index: Int) {
+    func reorderRegularTabs(_ tab: Tab, in spaceId: UUID, to index: Int) {
         guard var regularTabs = tabsBySpace[spaceId],
               let currentIndex = regularTabs.firstIndex(where: { $0.id == tab.id }) else { return }
         guard index != currentIndex else { return }
+        
+        // Phase 4.1: Notify extension controller about tab movement
+        if #available(macOS 15.4, *) {
+            if let windowAdapter = ExtensionManager.shared.windowAdapter {
+                ExtensionManager.shared.notifyTabMoved(tab, fromIndex: currentIndex, inWindow: windowAdapter)
+            }
+        }
         
         if currentIndex < regularTabs.count { regularTabs.remove(at: currentIndex) }
         let clampedIndex = min(max(index, 0), regularTabs.count)
@@ -1567,8 +1601,27 @@ class TabManager: ObservableObject {
     }
     
     private func moveTabBetweenSpaces(_ tab: Tab, from fromSpaceId: UUID, to toSpaceId: UUID, asSpacePinned: Bool, toIndex: Int) {
+        // Phase 4.1: Track old index before moving
+        var oldIndex: Int?
+        if asSpacePinned {
+            if let spacePinned = spacePinnedTabs[fromSpaceId] {
+                oldIndex = spacePinned.firstIndex(where: { $0.id == tab.id })
+            }
+        } else {
+            if let regularTabs = tabsBySpace[fromSpaceId] {
+                oldIndex = regularTabs.firstIndex(where: { $0.id == tab.id })
+            }
+        }
+        
         // Remove from source space
         removeFromCurrentContainer(tab)
+        
+        // Phase 4.1: Notify extension controller about tab movement if we have an old index
+        if #available(macOS 15.4, *), let oldIndex = oldIndex {
+            if let windowAdapter = ExtensionManager.shared.windowAdapter {
+                ExtensionManager.shared.notifyTabMoved(tab, fromIndex: oldIndex, inWindow: windowAdapter)
+            }
+        }
         
         // Add to target space
         tab.spaceId = toSpaceId
@@ -1618,8 +1671,15 @@ class TabManager: ObservableObject {
         // Can't move the first tab up
         guard currentIndex > 0 else { return }
         
-        // Swap with the tab above
+        // Phase 4.1: Notify extension controller about tab movement
         let tab = tabs[currentIndex]
+        if #available(macOS 15.4, *) {
+            if let windowAdapter = ExtensionManager.shared.windowAdapter {
+                ExtensionManager.shared.notifyTabMoved(tab, fromIndex: currentIndex, inWindow: windowAdapter)
+            }
+        }
+        
+        // Swap with the tab above
         let targetTab = tabs[currentIndex - 1]
         
         let tempIndex = tab.index
@@ -1637,6 +1697,14 @@ class TabManager: ObservableObject {
         
         // Can't move the last tab down
         guard currentIndex < tabs.count - 1 else { return }
+        
+        // Phase 4.1: Notify extension controller about tab movement
+        if #available(macOS 15.4, *) {
+            let tab = tabs[currentIndex]
+            if let windowAdapter = ExtensionManager.shared.windowAdapter {
+                ExtensionManager.shared.notifyTabMoved(tab, fromIndex: currentIndex, inWindow: windowAdapter)
+            }
+        }
         
         // Swap with the tab below
         let tab = tabs[currentIndex]
@@ -1858,6 +1926,74 @@ class TabManager: ObservableObject {
         else { return }
         let previousIndex = currentIndex == 0 ? all.count - 1 : currentIndex - 1
         if previousIndex < all.count { setActiveTab(all[previousIndex]) }
+    }
+    
+    // MARK: - Multi-Selection Support (Phase 1.7)
+    
+    func setTabSelected(_ tab: Tab, selected: Bool) {
+        if selected {
+            selectedTabs.insert(tab.id)
+        } else {
+            selectedTabs.remove(tab.id)
+        }
+    }
+    
+    func isTabSelected(_ tab: Tab) -> Bool {
+        return selectedTabs.contains(tab.id)
+    }
+    
+    // MARK: - Tab Duplication (Phase 1.8)
+    
+    func duplicateTab(_ sourceTab: Tab, configuration: WKWebExtension.TabConfiguration) -> Tab {
+        // Determine target space
+        let targetSpace: Space?
+        if let window = configuration.window as? ExtensionWindowAdapter {
+            // Use the window's current space
+            targetSpace = currentSpace
+        } else {
+            targetSpace = currentSpace ?? ensureDefaultSpaceIfNeeded()
+        }
+        
+        // Create new tab with source tab's URL and name
+        let newTab = Tab(
+            url: sourceTab.url,
+            name: sourceTab.name,
+            favicon: "globe",  // Will be updated by fetchAndSetFavicon
+            spaceId: targetSpace?.id,
+            index: 0,  // Will be set correctly after insertion
+            browserManager: browserManager
+        )
+        
+        // Handle parent tab relationship
+        if let parentTab = configuration.parentTab as? ExtensionTabAdapter {
+            newTab.parentTabId = parentTab.tab.id
+        } else {
+            // Default to source tab as parent
+            newTab.parentTabId = sourceTab.id
+        }
+        
+        // Add tab to space
+        addTab(newTab)
+        
+        // Handle index positioning
+        if let spaceId = targetSpace?.id, let arr = tabsBySpace[spaceId] {
+            let targetIndex = min(configuration.index, arr.count)
+            if let newIndex = arr.firstIndex(where: { $0.id == newTab.id }) {
+                reorderRegularTabs(newTab, in: spaceId, to: targetIndex)
+            }
+        }
+        
+        // Handle pinning
+        if configuration.shouldBePinned {
+            pinTab(newTab)
+        }
+        
+        // Handle active state
+        if configuration.shouldBeActive {
+            setActiveTab(newTab)
+        }
+        
+        return newTab
     }
 
     private func toRuntime(_ e: TabEntity) -> Tab {

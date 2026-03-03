@@ -194,9 +194,11 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
     
     var webView: WKWebView? {
         if _webView == nil {
+            #if DEBUG
             let stackSymbols = Thread.callStackSymbols.prefix(8).joined(separator: "\n  ")
             print("🔍 [MEMDEBUG] Tab.webView LAZY ACCESS - Tab: \(id.uuidString.prefix(8)), URL: \(url.absoluteString)")
             print("🔍 [MEMDEBUG] Stack trace:\n  \(stackSymbols)")
+            #endif
             setupWebView()
         }
         return _webView
@@ -217,18 +219,22 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
     /// Assigns the WebView to a specific window as its "primary" display
     /// Call this when a window first displays this tab
     func assignWebViewToWindow(_ webView: WKWebView, windowId: UUID) {
+        #if DEBUG
         print("🔍 [MEMDEBUG] Tab.assignWebViewToWindow() - Tab: \(id.uuidString.prefix(8)), Window: \(windowId.uuidString.prefix(8)), WebView: \(Unmanaged.passUnretained(webView).toOpaque())")
-        
+        #endif
+
         // If we already have a WebView assigned to a different window, this is an error
         // (should have been caught by WebViewCoordinator)
         if let existingWindow = primaryWindowId, existingWindow != windowId {
             print("⚠️ [MEMDEBUG] WARNING: Reassigning WebView from window \(existingWindow.uuidString.prefix(8)) to \(windowId.uuidString.prefix(8))")
         }
-        
+
         _webView = webView
         primaryWindowId = windowId
-        
+
+        #if DEBUG
         print("🔍 [MEMDEBUG]   -> Primary window assigned: \(windowId.uuidString.prefix(8))")
+        #endif
     }
 
     weak var browserManager: BrowserManager?
@@ -522,8 +528,10 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
     // MARK: - WebView Setup
 
     private func setupWebView() {
+        #if DEBUG
         print("🔍 [MEMDEBUG] Tab.setupWebView() START - Tab: \(id.uuidString.prefix(8)), Name: \(name), URL: \(url.absoluteString)")
         print("🔍 [MEMDEBUG]   _webView exists: \(_webView != nil), _existingWebView exists: \(_existingWebView != nil)")
+        #endif
         
         let resolvedProfile = resolveProfile()
         let configuration: WKWebViewConfiguration
@@ -574,7 +582,9 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
         } else {
             let newWebView = FocusableWKWebView(frame: .zero, configuration: configuration)
             _webView = newWebView
+            #if DEBUG
             print("🔍 [MEMDEBUG] Tab CREATED NEW PRIMARY WebView - Tab: \(id.uuidString.prefix(8)), WebView: \(Unmanaged.passUnretained(newWebView).toOpaque()), ConfigStore: \(configuration.websiteDataStore.identifier?.uuidString.prefix(8) ?? "default")")
+            #endif
             if let fv = _webView as? FocusableWKWebView {
                 fv.owningTab = self
                 fv.contextMenuBridge = WebContextMenuBridge(tab: self, configuration: configuration)
@@ -666,12 +676,14 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
             // No ad-hoc page script injection here; rely on WKWebExtension
         }
 
+        #if DEBUG
         // For existing WebViews, ensure the delegates are updated to point to this tab
         if _existingWebView != nil {
             print("🔍 [MEMDEBUG] Tab setup COMPLETE (existing WebView) - Tab: \(id.uuidString.prefix(8))")
         } else {
             print("🔍 [MEMDEBUG] Tab setup COMPLETE (new WebView) - Tab: \(id.uuidString.prefix(8)), WebView: \(Unmanaged.passUnretained(_webView!).toOpaque())")
         }
+        #endif
 
         // Inform extensions that this tab's view is now open/available BEFORE loading,
         // so content scripts and messaging can resolve this tab during early document phases
@@ -996,6 +1008,8 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
     private func injectMediaDetection(to webView: WKWebView) {
         let mediaDetectionScript = """
             (function() {
+                if (window.__nookMediaDetectionInstalled) { return; }
+                window.__nookMediaDetectionInstalled = true;
                 const handlerName = 'mediaStateChange_\(id.uuidString)';
 
                 // Track current URL for navigation detection
@@ -1166,7 +1180,7 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
                 }
 
                 function addAudioListeners(element) {
-                    ['play', 'pause', 'ended', 'loadedmetadata', 'canplay', 'volumechange', 'timeupdate'].forEach(event => {
+                    ['play', 'pause', 'ended', 'loadedmetadata', 'canplay', 'volumechange'].forEach(event => {
                         element.addEventListener(event, function() {
                             setTimeout(checkMediaState, 50);
                         });
@@ -1285,9 +1299,6 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
 
                 setTimeout(setupStreamingSiteMonitoring, 1000);
                 setTimeout(checkMediaState, 500);
-                setInterval(() => {
-                    checkMediaState();
-                }, 5000);
             })();
             """
 
@@ -1455,7 +1466,7 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
         isMonitoringNativeAudio = true
 
         audioMonitoringTimer = Timer.scheduledTimer(
-            timeInterval: 1.0, target: self,
+            timeInterval: 3.0, target: self,
             selector: #selector(handleNativeAudioMonitoringTimer(_:)), userInfo: nil, repeats: true)
 
         setupAudioSessionNotifications()
@@ -1986,6 +1997,8 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
     private func injectLinkHoverJavaScript(to webView: WKWebView) {
         let linkHoverScript = """
             (function() {
+                if (window.__nookLinkHoverInstalled) { return; }
+                window.__nookLinkHoverInstalled = true;
                 var currentHoveredLink = null;
                 var isCommandPressed = false;
                 var hoverCheckInterval = null;
@@ -2144,6 +2157,8 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
     private func injectPiPStateListener(to webView: WKWebView) {
         let pipStateScript = """
             (function() {
+                if (window.__nookPiPListenerInstalled) { return; }
+                window.__nookPiPListenerInstalled = true;
                 function notifyPiPStateChange(isActive) {
                     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.pipStateChange) {
                         window.webkit.messageHandlers.pipStateChange.postMessage({ active: isActive });
@@ -2462,8 +2477,10 @@ extension Tab: WKNavigationDelegate {
             if #available(macOS 15.5, *) {
                 ExtensionManager.shared.notifyTabPropertiesChanged(self, properties: [.URL])
 
+                #if DEBUG
                 // Extension diagnostics: check content scripts, background worker, and messaging
                 ExtensionManager.shared.diagnoseExtensionState(for: webView, url: newURL)
+                #endif
             }
             browserManager?.syncTabAcrossWindows(self.id)
 

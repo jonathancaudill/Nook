@@ -161,9 +161,6 @@ struct NavButtonsView: View {
         .onChange(of: browserManager.currentTab(for: windowState)?.id) { _, _ in
             updateCurrentTab()
         }
-        .onReceive(Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()) { _ in
-            updateCurrentTab()
-        }
     }
     
     private func updateCurrentTab() {

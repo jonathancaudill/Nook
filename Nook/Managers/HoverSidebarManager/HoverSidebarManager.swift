@@ -66,7 +66,12 @@ final class HoverSidebarManager: ObservableObject {
     deinit { stop() }
 
     // MARK: - Mouse Logic
+    private var lastMouseHandleTime: CFAbsoluteTime = 0
+
     private func scheduleHandleMouseMovement() {
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastMouseHandleTime >= 0.016 else { return } // 16ms throttle (~60Hz max)
+        lastMouseHandleTime = now
         // Ensure main-actor work since we touch NSApp/window and main-actor BrowserManager
         DispatchQueue.main.async { [weak self] in
             self?.handleMouseMovementOnMain()

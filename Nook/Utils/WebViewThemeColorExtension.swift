@@ -169,7 +169,7 @@ extension WKWebView {
                             clearInterval(t);
                             done();
                         }
-                    }, 50);
+                    }, 250);
                 });
             }
 

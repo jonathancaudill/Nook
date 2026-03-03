@@ -607,6 +607,7 @@ class BrowserManager: ObservableObject {
 
     private func bindTabManagerUpdates() {
         tabManager.objectWillChange
+            .throttle(for: .milliseconds(16), scheduler: RunLoop.main, latest: true)
             .sink { [weak self] _ in
                 self?.objectWillChange.send()
             }

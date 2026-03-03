@@ -42,11 +42,9 @@ class WebsiteShortcutDetector {
     weak var browserManager: BrowserManager?
     
     // MARK: - Initialization
-    
-    init() {
-        startCleanupTimer()
-    }
-    
+
+    init() {}
+
     deinit {
         cleanupTimer?.invalidate()
     }
@@ -140,6 +138,7 @@ class WebsiteShortcutDetector {
             timestamp: now,
             websiteName: websiteName
         )
+        scheduleCleanup()
         
         // Show conflict toast via notification
         let conflictInfo = ShortcutConflictInfo(
@@ -178,9 +177,10 @@ class WebsiteShortcutDetector {
     
     // MARK: - Private Methods
     
-    private func startCleanupTimer() {
-        // Clean up expired pending shortcuts every 500ms
-        cleanupTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+    private func scheduleCleanup() {
+        // Schedule a one-shot cleanup after the conflict timeout expires
+        cleanupTimer?.invalidate()
+        DispatchQueue.main.asyncAfter(deadline: .now() + conflictTimeout + 0.1) { [weak self] in
             Task { @MainActor in
                 self?.cleanupExpiredPendingShortcuts()
             }
@@ -315,12 +315,10 @@ extension WebsiteShortcutDetector {
                 }
             }
             
-            // Report periodically and on visibility change
-            setInterval(reportShortcuts, 5000);
+            // Report on visibility change and with two one-shot checks
             document.addEventListener('visibilitychange', reportShortcuts);
-            
-            // Initial report after a short delay
             setTimeout(reportShortcuts, 1000);
+            setTimeout(reportShortcuts, 5000);
         })();
         """
     }

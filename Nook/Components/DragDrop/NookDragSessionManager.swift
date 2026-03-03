@@ -207,6 +207,11 @@ final class NookDragSessionManager: ObservableObject {
     }
 
     private func _updateCursorScreenPosition(_ screenPoint: NSPoint) {
+        // Skip update if cursor hasn't moved meaningfully (1pt threshold)
+        let dx = screenPoint.x - cursorScreenLocation.x
+        let dy = screenPoint.y - cursorScreenLocation.y
+        guard dx * dx + dy * dy >= 1.0 else { return }
+
         cursorScreenLocation = screenPoint
 
         guard let window = NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible && !($0 is NookDragPreviewWindow) }),

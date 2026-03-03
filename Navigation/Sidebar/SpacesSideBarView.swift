@@ -130,7 +130,9 @@ struct SpacesSideBarView: View {
                         updateSidebarScreenFrame(geo)
                     }
                     .onChange(of: geo.frame(in: .global)) { _, _ in
-                        updateSidebarScreenFrame(geo)
+                        if dragSession.isDragging {
+                            updateSidebarScreenFrame(geo)
+                        }
                     }
             }
         )

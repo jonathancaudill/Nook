@@ -728,14 +728,13 @@ final class ExtensionManager: NSObject, ObservableObject,
             installRuntimeShim(browserRuntime, 'browser.runtime');
             installRuntimeShim(chromeRuntime, 'chrome.runtime');
 
-            // Some apps patch runtime methods after page load; re-apply wrappers briefly.
-            var shimAttempts = 0;
-            var shimTimer = setInterval(function() {
-                shimAttempts += 1;
-                installRuntimeShim(browserRuntime, 'browser.runtime');
-                installRuntimeShim(chromeRuntime, 'chrome.runtime');
-                if (shimAttempts >= 60) clearInterval(shimTimer);
-            }, 500);
+            // Some apps patch runtime methods after page load; re-apply wrappers with backoff.
+            [0, 500, 1000, 2000, 4000, 8000].forEach(function(delay) {
+                setTimeout(function() {
+                    installRuntimeShim(ensureRuntimeObject('browser'), 'browser.runtime');
+                    installRuntimeShim(ensureRuntimeObject('chrome'), 'chrome.runtime');
+                }, delay);
+            });
 
             console.log('[NOOK-EC] Polyfill ready — runtime sendMessage/connect wrapped (configured=' + _configuredRuntimeId + ')');
         })();

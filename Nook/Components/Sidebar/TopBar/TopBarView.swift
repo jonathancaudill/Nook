@@ -121,22 +121,6 @@ struct TopBarView: View {
                 previousTabId = newId
             }
         }
-        .onChange(
-            of: browserManager.currentTab(for: windowState)?.pageBackgroundColor
-        ) { _, _ in
-            // Color changes will trigger animations automatically via computed properties
-        }
-        .onChange(
-            of: browserManager.currentTab(for: windowState)?
-                .topBarBackgroundColor
-        ) { _, _ in
-            // Top bar color changes will trigger animations automatically via computed properties
-        }
-        .onReceive(
-            Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
-        ) { _ in
-            updateCurrentTab()
-        }
     }
 
     private var extensionsView: some View {

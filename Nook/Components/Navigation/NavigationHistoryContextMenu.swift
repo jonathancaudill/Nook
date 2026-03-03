@@ -66,13 +66,11 @@ struct NavigationHistoryContextMenu: View {
         .onChange(of: browserManager.currentTab(for: windowState)?.id) { _, _ in
             refreshHistory()
         }
-        .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
-            // Check if navigation state has changed and refresh if needed
-            let currentItems = loadHistoryItemsFresh()
-            if currentItems.count != historyItems.count ||
-               !currentItems.elementsEqual(historyItems, by: { $0.url == $1.url }) {
-                refreshHistory()
-            }
+        .onChange(of: browserManager.currentTab(for: windowState)?.canGoBack) { _, _ in
+            refreshHistory()
+        }
+        .onChange(of: browserManager.currentTab(for: windowState)?.canGoForward) { _, _ in
+            refreshHistory()
         }
     }
 

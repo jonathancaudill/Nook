@@ -97,12 +97,18 @@ final class AuthenticationManager: NSObject {
         activeIdentityTab = tab
         waitingForMiniWindow = true
 
-        manager.externalMiniWindowManager.present(url: request.url) { [weak self] success, finalURL in
-            guard let self else { return }
-            Task { @MainActor in
-                self.handleMiniWindowCompletion(success: success, finalURL: finalURL)
+        manager.externalMiniWindowManager.present(
+            url: request.url,
+            oauthOriginHost: request.url.host,
+            callbackScheme: request.explicitCallbackScheme,
+            prefersEphemeral: request.prefersEphemeralSession,
+            authCompletionHandler: { [weak self] success, finalURL in
+                guard let self else { return }
+                Task { @MainActor in
+                    self.handleMiniWindowCompletion(success: success, finalURL: finalURL)
+                }
             }
-        }
+        )
     }
 
     func handleAuthenticationChallenge(

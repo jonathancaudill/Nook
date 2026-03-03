@@ -2903,6 +2903,11 @@ final class ExtensionManager: NSObject, ObservableObject,
                 url: url.absoluteString,
                 in: space
             )
+            // Apply extension's webViewConfiguration so the tab shares the same
+            // process pool and extension controller (critical for extension messaging)
+            let cfg = extensionContext.webViewConfiguration
+                ?? BrowserConfiguration.shared.webViewConfiguration
+            newTab.applyWebViewConfigurationOverride(cfg)
             if configuration.shouldBePinned { bm.tabManager.pinTab(newTab) }
             if configuration.shouldBeActive {
                 bm.tabManager.setActiveTab(newTab)
@@ -2964,6 +2969,11 @@ final class ExtensionManager: NSObject, ObservableObject,
                 url: firstURL.absoluteString,
                 in: bm.tabManager.currentSpace
             )
+            // Apply extension's webViewConfiguration for OAuth flows to ensure
+            // the tab shares the same process pool and extension controller
+            let cfg = extensionContext.webViewConfiguration
+                ?? BrowserConfiguration.shared.webViewConfiguration
+            newTab.applyWebViewConfigurationOverride(cfg)
             bm.tabManager.setActiveTab(newTab)
 
             // Return a dummy window adapter for OAuth flows

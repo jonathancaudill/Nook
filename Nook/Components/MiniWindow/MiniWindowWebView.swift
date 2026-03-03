@@ -17,7 +17,11 @@ struct MiniWindowWebView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> WKWebView {
         let configuration: WKWebViewConfiguration
-        if let profile = session.profile {
+        if session.prefersEphemeral {
+            // Use non-persistent data store for ephemeral sessions
+            configuration = BrowserConfiguration.shared.cacheOptimizedWebViewConfiguration()
+            configuration.websiteDataStore = .nonPersistent()
+        } else if let profile = session.profile {
             configuration = BrowserConfiguration.shared.webViewConfiguration(for: profile)
         } else {
             configuration = BrowserConfiguration.shared.cacheOptimizedWebViewConfiguration()
@@ -145,58 +149,68 @@ struct MiniWindowWebView: NSViewRepresentable {
             // Add message handler for authentication completion
             installedWebView = webView
             webView.configuration.userContentController.add(self, name: "authCompletion")
-            
-            // Inject a simpler, less intrusive JavaScript to detect authentication completion
+
+            // Inject JavaScript to detect authentication completion using query parameter patterns
+            // Note: Uses [?&] prefix to ensure we match actual query parameters, not substrings in URLs
             let authDetectionScript = """
                 (function() {
-                    // Simple function to check for auth completion
                     function checkAuthCompletion() {
                         try {
                             const url = window.location.href;
                             const search = window.location.search;
                             const hash = window.location.hash;
-                            
-                            // Check for common OAuth success patterns
-                            if (search.match(/(code=|access_token=|id_token=|oauth_token=|oauth_verifier=|session_state=|samlresponse=|relaystate=|ticket=|assertion=|authuser=)/i) ||
-                                hash.match(/(access_token=|id_token=|oauth_token=|session_state=)/i)) {
-                                
-                                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.authCompletion) {
-                                    window.webkit.messageHandlers.authCompletion.postMessage({
-                                        success: true,
-                                        url: url
-                                    });
+
+                            // Check for common OAuth success patterns (as query parameters)
+                            const successPatterns = [
+                                /[?&]code=/i, /[?&]access_token=/i, /[?&]id_token=/i,
+                                /[?&]oauth_token=/i, /[?&]oauth_verifier=/i, /[?&]session_state=/i,
+                                /[?&]samlresponse=/i, /[?&]relaystate=/i, /[?&]ticket=/i,
+                                /[?&]assertion=/i, /[?&]authuser=/i
+                            ];
+
+                            for (const pattern of successPatterns) {
+                                if (pattern.test(search) || pattern.test(hash)) {
+                                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.authCompletion) {
+                                        window.webkit.messageHandlers.authCompletion.postMessage({
+                                            success: true,
+                                            url: url
+                                        });
+                                    }
+                                    return;
                                 }
-                                return;
                             }
-                            
-                            // Check for common OAuth error patterns
-                            if (search.match(/(error=|denied|cancelled|abort|failed|unauthorized|access_denied|invalid_request|unsupported_response_type|invalid_scope|server_error|temporarily_unavailable)/i) ||
-                                hash.match(/(error=|denied|cancelled|abort)/i)) {
-                                
-                                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.authCompletion) {
-                                    window.webkit.messageHandlers.authCompletion.postMessage({
-                                        success: false,
-                                        url: url
-                                    });
+
+                            // Check for common OAuth error patterns (as query parameters)
+                            const errorPatterns = [
+                                /[?&]error=/i, /[?&]error_description=/i,
+                                /[?&]error_uri=/i, /[?&]access_denied=/i
+                            ];
+
+                            for (const pattern of errorPatterns) {
+                                if (pattern.test(search) || pattern.test(hash)) {
+                                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.authCompletion) {
+                                        window.webkit.messageHandlers.authCompletion.postMessage({
+                                            success: false,
+                                            url: url
+                                        });
+                                    }
+                                    return;
                                 }
-                                return;
                             }
                         } catch (e) {
-                            // Silently ignore errors to avoid interfering with the page
-                            console.log('Auth detection error:', e);
+                            console.log('[Nook] Auth detection error:', e);
                         }
                     }
-                    
+
                     // Run check when page loads
                     if (document.readyState === 'loading') {
                         document.addEventListener('DOMContentLoaded', checkAuthCompletion);
                     } else {
                         checkAuthCompletion();
                     }
-                    
+
                     // Also check on hash changes (common in OAuth flows)
                     window.addEventListener('hashchange', checkAuthCompletion);
-                    
                 })();
             """
             
@@ -215,54 +229,65 @@ struct MiniWindowWebView: NSViewRepresentable {
         func checkForOAuthCompletion(url: URL) {
             // Skip if already completed
             guard !session.isAuthComplete else { return }
-            
-            // Check if this URL indicates OAuth completion
-            let urlString = url.absoluteString.lowercased()
+
+            // Check for explicit callback scheme match first
+            if let callbackScheme = session.callbackScheme,
+               let urlScheme = url.scheme?.lowercased(),
+               urlScheme == callbackScheme.lowercased() {
+                print("🔐 [MiniWindow] OAuth callback scheme matched: \(url.absoluteString)")
+                session.completeAuth(success: true, finalURL: url)
+                return
+            }
+
             let query = url.query?.lowercased() ?? ""
             let fragment = url.fragment?.lowercased() ?? ""
-            
-            // Common OAuth success indicators
+            let currentHost = url.host?.lowercased() ?? ""
+
+            // Common OAuth success indicators (as query parameter keys)
             let successIndicators = [
                 "code=", "access_token=", "id_token=", "oauth_token=", "oauth_verifier=",
                 "session_state=", "samlresponse=", "relaystate=", "ticket=", "assertion=",
                 "authuser="
             ]
-            
-            // Common OAuth error indicators
+
+            // Common OAuth error indicators (as query parameter keys)
             let errorIndicators = [
-                "error=", "denied", "cancelled", "abort", "failed", "unauthorized",
-                "access_denied", "invalid_request", "unsupported_response_type",
-                "invalid_scope", "server_error", "temporarily_unavailable"
+                "error=", "error_description=", "error_uri=", "access_denied="
             ]
-            
-            // Check for success in URL, query, or fragment
-            if successIndicators.contains(where: { 
-                urlString.contains($0) || query.contains($0) || fragment.contains($0) 
-            }) {
+
+            // Check for success indicators as query parameter keys only (not bare substrings)
+            let hasSuccessIndicator = successIndicators.contains { indicator in
+                query.contains(indicator) || fragment.contains(indicator)
+            }
+
+            if hasSuccessIndicator {
                 print("🔐 [MiniWindow] OAuth success detected: \(url.absoluteString)")
                 session.completeAuth(success: true, finalURL: url)
                 return
             }
-            
-            // Check for error in URL, query, or fragment
-            if errorIndicators.contains(where: { 
-                urlString.contains($0) || query.contains($0) || fragment.contains($0) 
-            }) {
+
+            // Check for error indicators as query parameter keys only
+            let hasErrorIndicator = errorIndicators.contains { indicator in
+                query.contains(indicator) || fragment.contains(indicator)
+            }
+
+            if hasErrorIndicator {
                 print("🔐 [MiniWindow] OAuth error detected: \(url.absoluteString)")
                 session.completeAuth(success: false, finalURL: url)
                 return
             }
-            
-            // Check for redirect back to original domain (common OAuth pattern)
-            if let host = url.host?.lowercased(),
-               !host.contains("google.com") && !host.contains("microsoft.com") && 
-               !host.contains("apple.com") && !host.contains("github.com") &&
-               !host.contains("auth0.com") && !host.contains("okta.com") &&
-               !host.contains("facebook.com") && !host.contains("twitter.com") &&
-               !host.contains("discord.com") {
-                // This might be a redirect back to the original app
-                print("🔐 [MiniWindow] Possible OAuth redirect detected: \(url.absoluteString)")
-                session.completeAuth(success: true, finalURL: url)
+
+            // Check for redirect back to original domain (only if we left the OAuth provider)
+            if let originHost = session.oauthOriginHost,
+               currentHost != originHost,
+               !currentHost.isEmpty {
+                // We've left the original OAuth domain - check if we have indicators
+                // or if this looks like a completion
+                if hasSuccessIndicator || hasErrorIndicator {
+                    print("🔐 [MiniWindow] OAuth redirect to different domain with indicators: \(url.absoluteString)")
+                    session.completeAuth(success: true, finalURL: url)
+                }
+                // Don't auto-complete without indicators - user might still be in the flow
             }
         }
         
@@ -292,6 +317,24 @@ struct MiniWindowWebView: NSViewRepresentable {
 // MARK: - WKNavigationDelegate
 @MainActor
 extension MiniWindowWebView.Coordinator: WKNavigationDelegate {
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        // Check for callback scheme interception
+        if let scheme = session.callbackScheme,
+           let url = navigationAction.request.url,
+           let urlScheme = url.scheme?.lowercased(),
+           urlScheme == scheme.lowercased() {
+            print("🔐 [MiniWindow] Intercepted callback scheme navigation: \(url.absoluteString)")
+            session.completeAuth(success: true, finalURL: url)
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
+    }
+
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         print("🔐 [MiniWindow] Navigation started: \(webView.url?.absoluteString ?? "nil")")
         session.updateLoading(isLoading: true)

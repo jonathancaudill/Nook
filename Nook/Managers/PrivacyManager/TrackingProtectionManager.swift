@@ -204,8 +204,6 @@ final class TrackingProtectionManager {
         if !isEnabled { return false }
         if isTemporarilyDisabled(tabId: tab.id) { return false }
         if isDomainAllowed(tab.webView?.url?.host) { return false }
-        // Never apply tracking protection to OAuth flow tabs
-        if tab.isOAuthFlow { return false }
         return true
     }
 

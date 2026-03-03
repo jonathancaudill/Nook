@@ -26,13 +26,21 @@ final class MiniWindowSession: ObservableObject, Identifiable {
     @Published var authSuccess: Bool = false
     @Published var toolbarColor: NSColor?
 
+    // MARK: - OAuth Flow State
+    let oauthOriginHost: String?
+    let callbackScheme: String?
+    let prefersEphemeral: Bool
+
     init(
         url: URL,
         profile: Profile?,
         originName: String,
         targetSpaceResolver: @escaping () -> String,
         adoptHandler: @escaping (MiniWindowSession) -> Void,
-        authCompletionHandler: ((Bool, URL?) -> Void)? = nil
+        authCompletionHandler: ((Bool, URL?) -> Void)? = nil,
+        oauthOriginHost: String? = nil,
+        callbackScheme: String? = nil,
+        prefersEphemeral: Bool = false
     ) {
         self.profile = profile
         self.originName = originName
@@ -41,6 +49,9 @@ final class MiniWindowSession: ObservableObject, Identifiable {
         self.authCompletionHandler = authCompletionHandler
         self.currentURL = url
         self.title = url.absoluteString
+        self.oauthOriginHost = oauthOriginHost
+        self.callbackScheme = callbackScheme
+        self.prefersEphemeral = prefersEphemeral
     }
 
     var targetSpaceName: String { targetSpaceResolver() }
@@ -112,7 +123,13 @@ final class ExternalMiniWindowManager {
         self.browserManager = browserManager
     }
 
-    func present(url: URL, authCompletionHandler: ((Bool, URL?) -> Void)? = nil) {
+    func present(
+        url: URL,
+        oauthOriginHost: String? = nil,
+        callbackScheme: String? = nil,
+        prefersEphemeral: Bool = false,
+        authCompletionHandler: ((Bool, URL?) -> Void)? = nil
+    ) {
         guard let browserManager else { return }
         let profile = browserManager.currentProfile
         let session = MiniWindowSession(
@@ -132,7 +149,10 @@ final class ExternalMiniWindowManager {
             adoptHandler: { [weak self] session in
                 self?.adopt(session: session)
             },
-            authCompletionHandler: authCompletionHandler
+            authCompletionHandler: authCompletionHandler,
+            oauthOriginHost: oauthOriginHost,
+            callbackScheme: callbackScheme,
+            prefersEphemeral: prefersEphemeral
         )
 
         let controller = MiniBrowserWindowController(

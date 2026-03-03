@@ -29,16 +29,6 @@ public class Tab: NSObject, Identifiable, ObservableObject, WKDownloadDelegate {
     // Track Option key state for Peek functionality
     var isOptionKeyDown: Bool = false
 
-    // MARK: - OAuth Flow State
-    /// Whether this tab is hosting an OAuth/sign-in flow popup
-    var isOAuthFlow: Bool = false
-    /// Reference to the parent tab that initiated this OAuth flow
-    var oauthParentTabId: UUID?
-    /// The OAuth provider host (e.g., "accounts.google.com") for tracking protection exemption
-    var oauthProviderHost: String?
-    /// The URL pattern that indicates OAuth completion (redirect back to original domain)
-    var oauthCompletionURLPattern: String?
-
     // MARK: - Pin State
     var isPinned: Bool = false  // Global pinned (essentials)
     var isSpacePinned: Bool = false  // Space-level pinned
@@ -2554,11 +2544,6 @@ extension Tab: WKNavigationDelegate {
         if isAudioMuted {
             setMuted(true)
         }
-        
-        // Check for OAuth completion and auto-close if needed
-        if isOAuthFlow, let currentURL = webView.url {
-            checkOAuthCompletion(url: currentURL)
-        }
     }
 
     // MARK: - Loading Failed (after content started loading)
@@ -2990,13 +2975,16 @@ extension Tab: WKScriptMessageHandler {
     }
 
     private func isLikelyOAuthOrExternalWindow(url: URL, windowFeatures: WKWindowFeatures) -> Bool {
+        // Strict check: must be an OAuth-like URL
         if OAuthDetector.isLikelyOAuthPopupURL(url) { return true }
 
-        // If the popup has explicit dimensions it's almost certainly a modal sign-in window
+        // Only route sized popups to MiniWindow if they also look OAuth-ish.
+        // Explicit dimensions alone are used by payment forms, chat widgets, etc.
         if let width = windowFeatures.width, let height = windowFeatures.height,
             width.doubleValue > 0 && height.doubleValue > 0
         {
-            return true
+            // Sized popup: only route if the URL has SOME OAuth signal
+            return OAuthDetector.isLikelyOAuthURL(url)
         }
 
         return false
@@ -3157,90 +3145,6 @@ extension Tab: WKUIDelegate {
         }
 
         return newWebView
-    }
-
-    // MARK: - OAuth Tab Helpers
-    
-    /// Sets up message handlers for an OAuth popup tab
-    private func setupOAuthTabMessageHandlers(for tab: Tab, webView: WKWebView) {
-        let userContentController = webView.configuration.userContentController
-        
-        // Remove any existing handlers first
-        let handlerNames = ["linkHover", "commandHover", "commandClick", "pipStateChange",
-                           "mediaStateChange_\(tab.id.uuidString)",
-                           "backgroundColor_\(tab.id.uuidString)",
-                           "historyStateDidChange", "NookIdentity"]
-        
-        for handlerName in handlerNames {
-            userContentController.removeScriptMessageHandler(forName: handlerName)
-        }
-        
-        // Add handlers for the OAuth tab
-        userContentController.add(tab, name: "linkHover")
-        userContentController.add(tab, name: "commandHover")
-        userContentController.add(tab, name: "commandClick")
-        userContentController.add(tab, name: "pipStateChange")
-        userContentController.add(tab, name: "mediaStateChange_\(tab.id.uuidString)")
-        userContentController.add(tab, name: "backgroundColor_\(tab.id.uuidString)")
-        userContentController.add(tab, name: "historyStateDidChange")
-        userContentController.add(tab, name: "NookIdentity")
-    }
-    
-    /// Checks if a URL indicates OAuth completion and handles the flow
-    private func checkOAuthCompletion(url: URL) {
-        guard isOAuthFlow, let parentTabId = oauthParentTabId,
-              let bm = browserManager else { return }
-        
-        let urlString = url.absoluteString.lowercased()
-        let host = url.host?.lowercased() ?? ""
-        
-        // Check for OAuth success indicators
-        let successIndicators = ["code=", "access_token=", "id_token=", "oauth_token=",
-                                "oauth_verifier=", "session_state=", "samlresponse="]
-        
-        // Check for OAuth error indicators
-        let errorIndicators = ["error=", "access_denied", "invalid_request", "denied"]
-        
-        let isSuccess = successIndicators.contains { urlString.contains($0) }
-        let isError = errorIndicators.contains { urlString.contains($0) }
-        
-        // Check if this is a redirect back to the original domain (not the OAuth provider)
-        if let providerHost = oauthProviderHost, !host.contains(providerHost),
-           (isSuccess || isError || !OAuthDetector.isLikelyOAuthURL(url)) {
-            
-            print("🔐 [Tab] OAuth flow completed: success=\(isSuccess), closing OAuth tab")
-            
-            // Find and reload the parent tab
-            if let parentTab = bm.tabManager.allTabs().first(where: { $0.id == parentTabId }) {
-                DispatchQueue.main.async { [weak bm] in
-                    // Switch to parent tab
-                    bm?.tabManager.setActiveTab(parentTab)
-                    // Reload parent tab to pick up authenticated state
-                    parentTab.activeWebView.reload()
-                }
-            }
-            
-            // Close this OAuth tab
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak bm, weak self] in
-                guard let self = self, let bm = bm else { return }
-                print("🔐 [Tab] Auto-closing OAuth tab: \(self.name)")
-                bm.tabManager.removeTab(self.id)
-            }
-        }
-    }
-    
-    private func handleMiniWindowAuthCompletion(success: Bool, finalURL: URL?) {
-        print(
-            "🪟 [Tab] Popup OAuth flow completed: success=\(success), finalURL=\(finalURL?.absoluteString ?? "nil")"
-        )
-
-        if success {
-            DispatchQueue.main.async { [weak self] in
-                self?.activeWebView.reload()
-            }
-        } else {
-            print("🪟 [Tab] Popup OAuth authentication failed")
-        }
     }
 
     public func webView(

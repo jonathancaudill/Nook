@@ -60,6 +60,11 @@ class BrowserConfiguration {
         // Web inspector will be enabled per-webview using isInspectable property
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
 
+        // Inject chrome.identity polyfill for extension OAuth support
+        if let identityScript = BrowserConfiguration.identityPolyfillScript() {
+            config.userContentController.addUserScript(identityScript)
+        }
+
         // Note: webExtensionController will be set by ExtensionManager during initialization
         // Note: WebAuthn/Passkey support is enabled by default in WKWebView on macOS 13.3+
         // and requires only: entitlements, WKUIDelegate methods, and Info.plist descriptions
@@ -113,18 +118,36 @@ class BrowserConfiguration {
     }
 
     // MARK: - Chrome Web Store Integration
-    
+
     /// Get the Web Store injector script
     static func webStoreInjectorScript() -> WKUserScript? {
         guard let scriptPath = Bundle.main.path(forResource: "WebStoreInjector", ofType: "js"),
               let scriptSource = try? String(contentsOfFile: scriptPath, encoding: .utf8) else {
             return nil
         }
-        
+
         return WKUserScript(
             source: scriptSource,
             injectionTime: .atDocumentEnd,
             forMainFrameOnly: true
+        )
+    }
+
+    // MARK: - Identity Polyfill
+
+    /// Get the chrome.identity API polyfill script for extension OAuth support
+    static func identityPolyfillScript() -> WKUserScript? {
+        guard let scriptPath = Bundle.main.path(forResource: "NookIdentityPolyfill", ofType: "js"),
+              let scriptSource = try? String(contentsOfFile: scriptPath, encoding: .utf8) else {
+            print("⚠️ [BrowserConfig] Failed to load NookIdentityPolyfill.js")
+            return nil
+        }
+
+        // Inject at document start so the API is available immediately for extension content scripts
+        return WKUserScript(
+            source: scriptSource,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
         )
     }
     
